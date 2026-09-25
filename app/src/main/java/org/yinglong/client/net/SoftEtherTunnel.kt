@@ -172,8 +172,8 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
             connectTimeoutMs = 12_000,
             country = relay.countryShort ?: "",
             clientProductName = "Yinglong",
-            clientVersion = "0.7.0",
-            clientBuild = 24
+            clientVersion = "0.7.1",
+            clientBuild = 25
         )
 
         val intent = Intent(appContext, SoftEtherVpnService::class.java).apply {

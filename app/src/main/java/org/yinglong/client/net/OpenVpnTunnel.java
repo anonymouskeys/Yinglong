@@ -645,8 +645,8 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
         String extra = safe(profile.mCustomConfigOptions);
         String low = extra.toLowerCase(Locale.US);
         if (!low.contains("tls-version-min")) {
-            if (!extra.isEmpty() && !extra.endsWith("\\n")) extra += "\\n";
-            extra += "tls-version-min 1.0\\n";
+            if (!extra.isEmpty() && !extra.endsWith("\n")) extra += "\n";
+            extra += "tls-version-min 1.0\n";
             profile.mUseCustomConfig = true;
             profile.mCustomConfigOptions = extra;
         }
@@ -654,7 +654,7 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
         AppLog.i("engine-v7",
                 "OpenVPN3 compatibility legacyAlgorithms=true"
                         + " nonPreferredDC=true tlsCertProfile=legacy"
-                        + " tlsMin=1.0 retryMax=0");
+                        + " tlsMin=1.0 newline=real retryMax=0");
     }
 
     private static boolean containsCipher(String list, String cipher) {
