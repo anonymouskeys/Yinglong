@@ -145,6 +145,7 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
         if (config == null || config.trim().isEmpty()) throw new IOException("empty OpenVPN profile");
 
         OpenVpnProfileUtil.Endpoint endpoint = OpenVpnProfileUtil.endpoint(relay);
+        boolean tcpTransport = endpoint == null || endpoint.tcp;
         String endpointText = endpoint == null ? "?" : ((endpoint.tcp ? "tcp" : "udp") + ":" + endpoint.port);
         AppLog.i("tunnel", "profile relay=" + relay.ip + " endpoint=" + endpointText + " chars=" + config.length());
         if (progress != null) progress.onStage("PROFILE", endpointText);
@@ -154,6 +155,10 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
             ConfigParser parser = new ConfigParser();
             parser.parseConfig(new StringReader(config));
             profile = parser.convertProfile();
+            applyVpnGateCompatibility(profile);
+            if (!tcpTransport) {
+                applyUdpMtuRescue(profile);
+            }
         } catch (Throwable e) {
             lastFailure = "profile parse: " + e.getClass().getSimpleName();
             AppLog.e("tunnel", "profile parse failed for " + relay.ip, e);
@@ -201,17 +206,23 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
         }
 
         boolean signaled = false;
-        long overallMs = Math.max(15_000L, timeoutMs);
+        long overallMs = Math.max(20_000L, timeoutMs);
         long overallDeadline = SystemClock.elapsedRealtime() + overallMs;
+        long preReplyStallMs = tcpTransport ? 14_000L : 8_000L;
+        long postReplyStallMs = tcpTransport ? 30_000L : 40_000L;
+        AppLog.i("tunnel", "watchdog relay=" + relay.ip
+                + " transport=" + (tcpTransport ? "tcp" : "udp")
+                + " overallMs=" + overallMs
+                + " preReply=" + preReplyStallMs
+                + " postReply=" + postReplyStallMs);
         try {
             while (!(signaled = attempt.done.await(250L, TimeUnit.MILLISECONDS))) {
                 long now = SystemClock.elapsedRealtime();
                 long idle = now - attempt.lastProgressAt;
-                // Before the server replies we fail quickly. Once TLS/AUTH has started, VPN Gate
-                // can legitimately need well over ten seconds to finish the handshake and PUSH.
-                // A replying VPN Gate server may need longer than 22s to finish
-                // TLS and PUSH. Do not kill a verified server certificate prematurely.
-                long stallLimit = attempt.serverReplied ? 45_000L : 12_000L;
+                // A non-replying endpoint is abandoned quickly. Once the server has
+                // replied, let TLS/PUSH breathe, but do not burn a minute on a relay
+                // that verified its certificate and then stopped making progress.
+                long stallLimit = attempt.serverReplied ? postReplyStallMs : preReplyStallMs;
                 if (idle >= stallLimit) {
                     attempt.failure = "stalled " + idle + " ms at " + attempt.lastStage;
                     break;
@@ -329,6 +340,20 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
         Attempt attempt = currentAttempt;
         if (attempt == null) return;
 
+        long attemptAgeMs = SystemClock.elapsedRealtime() - attempt.launchedAt;
+
+        // startOpenVpn(..., true) replaces the old OpenVPN process inside the same
+        // service. The old process can emit EXITING/NOPROCESS/NONETWORK a moment
+        // after the new profile has started. Those callbacks belong to the old
+        // process and must not fail the new relay attempt.
+        if (attemptAgeMs < 4_000L
+                && (level == ConnectionStatus.LEVEL_NOTCONNECTED
+                    || level == ConnectionStatus.LEVEL_NONETWORK)) {
+            AppLog.w("ovpn-state", "ignoring stale replacement state=" + s
+                    + " ageMs=" + attemptAgeMs + " relay=" + attempt.relay.ip);
+            return;
+        }
+
         attempt.stage(s, msg);
 
         if (level == ConnectionStatus.LEVEL_CONNECTED) {
@@ -441,6 +466,61 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
         } catch (Throwable e) {
             AppLog.e("openvpn", "failed to render engine log item", e);
         }
+    }
+
+    private void applyUdpMtuRescue(VpnProfile profile) {
+        if (profile == null) return;
+
+        String extra = safe(profile.mCustomConfigOptions);
+        String low = extra.toLowerCase(java.util.Locale.US);
+        if (!low.contains("max-packet-size")) {
+            if (!extra.isEmpty() && !extra.endsWith("\n")) extra += "\n";
+            extra += "max-packet-size 1000\n";
+        }
+        profile.mUseCustomConfig = true;
+        profile.mCustomConfigOptions = extra;
+        AppLog.i("tunnel", "UDP MTU rescue enabled max-packet-size=1000");
+    }
+
+    private void applyVpnGateCompatibility(VpnProfile profile) {
+        if (profile == null) return;
+
+        // A large part of the public VPN Gate pool is made of older
+        // SoftEther/OpenVPN peers. Keep the profile's legacy data cipher usable
+        // with OpenVPN 2.7/OpenSSL 3 and explicitly require a server certificate.
+        if (profile.mCompatMode <= 0) profile.mCompatMode = 20307;
+
+        String cipher = safe(profile.mCipher).trim();
+        String dataCiphers = safe(profile.mDataCiphers).trim();
+        if (!cipher.isEmpty() && !containsCipher(dataCiphers, cipher)) {
+            profile.mDataCiphers = dataCiphers.isEmpty()
+                    ? cipher
+                    : dataCiphers + ":" + cipher;
+            dataCiphers = profile.mDataCiphers;
+        }
+
+        profile.mUseLegacyProvider = true;
+        if (safe(profile.mTlSCertProfile).trim().isEmpty()) {
+            profile.mTlSCertProfile = "legacy";
+        }
+        profile.mExpectTLSCert = true;
+
+        AppLog.i("tunnel", "VPNGate compatibility compatMode=" + profile.mCompatMode
+                + " cipher=" + safe(profile.mCipher)
+                + " dataCiphers=" + safe(profile.mDataCiphers)
+                + " serverCert=" + profile.mExpectTLSCert
+                + " legacyProvider=" + profile.mUseLegacyProvider
+                + " tlsCertProfile=" + safe(profile.mTlSCertProfile));
+    }
+
+    private static boolean containsCipher(String list, String cipher) {
+        if (list == null || list.isEmpty() || cipher == null || cipher.isEmpty()) {
+            return false;
+        }
+        for (String item : list.split(":")) {
+            if (cipher.equalsIgnoreCase(item.trim())) return true;
+        }
+        return false;
     }
 
     private boolean waitForAndroidVpnTransport(long timeoutMs) {

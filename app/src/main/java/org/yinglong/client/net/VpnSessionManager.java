@@ -8,6 +8,7 @@ import org.yinglong.client.catalog.RelayStore;
 import org.yinglong.client.catalog.RelayUpdater;
 import org.yinglong.client.diag.AppLog;
 
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -18,7 +19,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Yinglong v0.3.14 hybrid session:
+ * Yinglong v0.3.15 hybrid session:
  * native SoftEther first, official VPN Gate OpenVPN profile as fallback.
  */
 public final class VpnSessionManager {
@@ -42,10 +43,10 @@ public final class VpnSessionManager {
     private volatile String detail = "";
 
     private static final int BOOTSTRAP_ROUNDS = 3;
-    private static final int SOFTETHER_MAX_RELAY_ATTEMPTS = 1;
+    private static final int SOFTETHER_MAX_RELAY_ATTEMPTS = 0;
     private static final long SOFTETHER_ATTEMPT_TIMEOUT_MS = 55_000L;
-    private static final int OPENVPN_MAX_ATTEMPTS = 20;
-    private static final long OPENVPN_TCP_TIMEOUT_MS = 60_000L;
+    private static final int OPENVPN_MAX_ATTEMPTS = 24;
+    private static final long OPENVPN_TCP_TIMEOUT_MS = 40_000L;
     private static final long OPENVPN_UDP_TIMEOUT_MS = 45_000L;
 
     public static VpnSessionManager get(Context context) {
@@ -168,7 +169,7 @@ public final class VpnSessionManager {
                 int connectedPort = 0;
 
                 // 1) Try only a couple of different SoftEther hosts.
-                if (softEther.engineHealthy()) {
+                if (softEther.engineHealthy() && SOFTETHER_MAX_RELAY_ATTEMPTS > 0) {
                     setState(State.SEARCHING, "SoftEther: ищу живые нативные endpoint…");
 
                     List<SoftEtherProbe.Result> softCandidates = SoftEtherProbe.rank(
@@ -272,6 +273,9 @@ public final class VpnSessionManager {
                                                     + " • кандидатов " + accepted);
                                 }
                             });
+
+                    ovpnCandidates = orderOpenVpnCandidates(ovpnCandidates);
+                    AppLog.i("session", "OpenVPN interleaved candidates=" + ovpnCandidates.size());
 
                     Set<String> tried = new HashSet<>();
                     int ovpnAttempt = 0;
@@ -443,6 +447,33 @@ public final class VpnSessionManager {
                 AppLog.e("state", "listener failed", e);
             }
         }
+    }
+
+    private static List<RelayProbe.Result> orderOpenVpnCandidates(
+            List<RelayProbe.Result> ranked) {
+        List<RelayProbe.Result> tcp = new ArrayList<>();
+        List<RelayProbe.Result> udp = new ArrayList<>();
+
+        for (RelayProbe.Result result : ranked) {
+            if (result == null) continue;
+            if (result.tcp) tcp.add(result);
+            else udp.add(result);
+        }
+
+        List<RelayProbe.Result> out = new ArrayList<>(ranked.size());
+        int ti = 0;
+        int ui = 0;
+
+        while (ti < tcp.size() || ui < udp.size()) {
+            for (int n = 0; n < 2 && ti < tcp.size(); n++) {
+                out.add(tcp.get(ti++));
+            }
+            if (ui < udp.size()) {
+                out.add(udp.get(ui++));
+            }
+        }
+
+        return out;
     }
 
     private static String safe(String value) {
