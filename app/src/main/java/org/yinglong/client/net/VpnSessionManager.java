@@ -44,7 +44,9 @@ public final class VpnSessionManager {
     // OpenVPN's control-channel handshake can legitimately outlive the raw TCP connect.
     // Give old VPN Gate peers enough time to either finish or emit their own useful TLS/cipher error.
     private static final long TCP_CONNECT_TIMEOUT_MS = 70_000L;
-    private static final long UDP_CONNECT_TIMEOUT_MS = 32_000L;
+    // Dead UDP is still cut after ~5.5s by OpenVpnTunnel. This larger window
+    // applies only once a server has actually replied and TLS is progressing.
+    private static final long UDP_CONNECT_TIMEOUT_MS = 90_000L;
 
     public static VpnSessionManager get(Context context) {
         VpnSessionManager local = instance;
@@ -150,6 +152,7 @@ public final class VpnSessionManager {
                 // do not burn minutes on endpoints that DPI lets half-open.
                 boolean preferUdp = true;
                 boolean tcpTlsFiltered = false;
+                int udpMtuRescues = 0;
                 boolean connectedThisRound = false;
                 Relay connectedRelay = null;
 
@@ -222,15 +225,44 @@ public final class VpnSessionManager {
 
                         if (!ok) {
                             if (!tunnel.lastFailure().isEmpty()) lastFailure = tunnel.lastFailure();
-                            if (result.tcp && looksLikePostCertificateTlsBlock(lastFailure)) {
+
+                            // X-dns AUTO-inspired cascade: a UDP endpoint that actually replied
+                            // gets one alternate transport strategy instead of being discarded.
+                            if (!result.tcp && tunnel.lastAttemptServerReplied()
+                                    && udpMtuRescues < 3 && active(token)) {
+                                udpMtuRescues++;
+                                String rescueBase = base + "\nMTU_RESCUE "
+                                        + udpMtuRescues + "/3 • max-packet-size 1000";
+                                AppLog.w("session", "UDP relay replied but handshake did not finish; "
+                                        + "retrying with MTU rescue relay=" + relay.ip);
+                                setState(State.CONNECTING, rescueBase);
+                                try {
+                                    ok = tunnel.connectBlocking(relay, UDP_CONNECT_TIMEOUT_MS, (stage, message) -> {
+                                        if (!active(token)) return;
+                                        String m = message == null || message.isEmpty() ? "" : " • " + message;
+                                        setState(State.CONNECTING, rescueBase + "\n" + stage + m);
+                                    }, true);
+                                } catch (Throwable e) {
+                                    lastFailure = e.getClass().getSimpleName() + ": " + safe(e.getMessage());
+                                    AppLog.e("session", "MTU rescue exception relay=" + relay.ip, e);
+                                    ok = false;
+                                }
+                                if (!ok && !tunnel.lastFailure().isEmpty()) {
+                                    lastFailure = tunnel.lastFailure();
+                                }
+                            }
+
+                            if (!ok && result.tcp && looksLikePostCertificateTlsBlock(lastFailure)) {
                                 tcpTlsFiltered = true;
                                 preferUdp = true;
                                 AppLog.w("session", "TCP control channel looks filtered after TLS certificate; "
                                         + "remaining TCP candidates will be skipped this round");
                                 setState(State.SEARCHING, "TCP после сертификата блокируется — переключаюсь на UDP");
                             }
-                            AppLog.w("session", "attempt failed relay=" + relay.ip + " reason=" + lastFailure);
-                            continue;
+                            if (!ok) {
+                                AppLog.w("session", "attempt failed relay=" + relay.ip + " reason=" + lastFailure);
+                                continue;
+                            }
                         }
 
                         connectedThisRound = true;

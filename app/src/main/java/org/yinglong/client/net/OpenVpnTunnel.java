@@ -51,6 +51,7 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
     private volatile boolean connected;
     private volatile Relay activeRelay;
     private volatile String lastFailure = "";
+    private volatile boolean lastAttemptServerReplied;
     private volatile boolean engineHealthy;
 
     private static final class Attempt {
@@ -116,6 +117,7 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
     public boolean isConnected() { return connected; }
     public Relay activeRelay() { return activeRelay; }
     public String lastFailure() { return lastFailure; }
+    public boolean lastAttemptServerReplied() { return lastAttemptServerReplied; }
     public boolean engineHealthy() { return engineHealthy; }
 
     public boolean connectBlocking(Relay relay, long timeoutMs) throws Exception {
@@ -123,9 +125,15 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
     }
 
     public boolean connectBlocking(Relay relay, long timeoutMs, ProgressListener progress) throws Exception {
+        return connectBlocking(relay, timeoutMs, progress, false);
+    }
+
+    public boolean connectBlocking(Relay relay, long timeoutMs, ProgressListener progress,
+                                   boolean udpLowMtuRescue) throws Exception {
         if (relay == null) throw new IllegalArgumentException("relay == null");
         if (!engineHealthy) throw new IllegalStateException("OpenVPN engine self-check failed; see log");
         if (!isPermissionGranted()) throw new IllegalStateException("Android VPN permission is not granted");
+        lastAttemptServerReplied = false;
 
         // Always tear down a stale service/tun from a previous attempt/process before a new relay.
         // This is cheap when nothing is running and prevents an old session from blocking failover.
@@ -150,6 +158,9 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
             parser.parseConfig(new StringReader(config));
             profile = parser.convertProfile();
             applyVpnGateCompatibility(profile);
+            if (!tcpTransport && udpLowMtuRescue) {
+                applyUdpMtuRescue(profile);
+            }
         } catch (Throwable e) {
             lastFailure = "profile parse: " + e.getClass().getSimpleName();
             AppLog.e("tunnel", "profile parse failed for " + relay.ip, e);
@@ -203,7 +214,9 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
         // OpenVPN control channel. A dead UDP relay should be abandoned quickly; a replying
         // relay still gets enough time to finish TLS and receive PUSH_REPLY.
         long preReplyStallMs = tcpTransport ? 12_000L : 5_500L;
-        long postReplyStallMs = tcpTransport ? 65_000L : 28_000L;
+        // Once UDP actually answers, it is alive. Let OpenVPN's own 60s TLS window finish.
+        // v0.3.7 used 28s here and could kill the first genuinely promising UDP relay.
+        long postReplyStallMs = tcpTransport ? 65_000L : 70_000L;
         AppLog.i("tunnel", "watchdog relay=" + relay.ip + " transport="
                 + (tcpTransport ? "tcp" : "udp") + " overallMs=" + overallMs
                 + " preReplyStallMs=" + preReplyStallMs
@@ -345,6 +358,7 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
         }
         if (level == ConnectionStatus.LEVEL_CONNECTING_SERVER_REPLIED) {
             attempt.serverReplied = true;
+            lastAttemptServerReplied = true;
             attempt.lastProgressAt = SystemClock.elapsedRealtime();
         }
 
@@ -426,16 +440,25 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
             if (attempt == null) return;
 
             String low = line.toLowerCase(java.util.Locale.US);
-            if (line.contains("TCP connection established")) {
+            if (low.contains("ehostunreach") || low.contains("no route to host")
+                    || low.contains("enetunreach") || low.contains("network is unreachable")) {
+                attempt.meaningfulProgress("NETWORK_UNREACHABLE", line);
+                attempt.failure = line;
+                attempt.success = false;
+                attempt.done.countDown();
+            } else if (line.contains("TCP connection established")) {
                 attempt.meaningfulProgress("TCP_OK", "TCP соединение установлено");
             } else if (line.startsWith("TLS: Initial packet")) {
                 attempt.serverReplied = true;
+                lastAttemptServerReplied = true;
                 attempt.meaningfulProgress("TLS", "сервер ответил, TLS handshake");
             } else if (line.contains("VERIFY OK: depth=0")) {
                 attempt.serverReplied = true;
+                lastAttemptServerReplied = true;
                 attempt.meaningfulProgress("TLS_CERT_OK", "сертификат сервера проверен");
             } else if (line.contains("Peer Connection Initiated")) {
                 attempt.serverReplied = true;
+                lastAttemptServerReplied = true;
                 attempt.meaningfulProgress("PEER_OK", "TLS завершён");
             } else if (line.contains("PUSH_REQUEST")) {
                 attempt.meaningfulProgress("GET_CONFIG", "запрашиваю маршруты");
@@ -457,6 +480,22 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
         } catch (Throwable e) {
             AppLog.e("openvpn", "failed to render engine log item", e);
         }
+    }
+
+    private void applyUdpMtuRescue(VpnProfile profile) {
+        if (profile == null) return;
+
+        // Retry-only strategy for a UDP relay that already answered.
+        // OpenVPN 2.7 uses max-packet-size to cap control-channel packets and mssfix.
+        String extra = safe(profile.mCustomConfigOptions);
+        String low = extra.toLowerCase(java.util.Locale.US);
+        if (!low.contains("max-packet-size")) {
+            if (!extra.isEmpty() && !extra.endsWith("\n")) extra += "\n";
+            extra += "max-packet-size 1000\n";
+        }
+        profile.mUseCustomConfig = true;
+        profile.mCustomConfigOptions = extra;
+        AppLog.i("tunnel", "UDP MTU rescue enabled max-packet-size=1000");
     }
 
     private void applyVpnGateCompatibility(VpnProfile profile) {
