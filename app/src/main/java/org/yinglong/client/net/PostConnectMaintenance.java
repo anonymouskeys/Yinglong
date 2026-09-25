@@ -6,6 +6,7 @@ import org.yinglong.client.catalog.Relay;
 import org.yinglong.client.catalog.RelayHealthStore;
 import org.yinglong.client.catalog.RelayStore;
 import org.yinglong.client.catalog.RelayUpdater;
+import org.yinglong.client.diag.AppLog;
 
 import java.util.HashSet;
 import java.util.List;
@@ -21,10 +22,18 @@ public final class PostConnectMaintenance {
     public PostConnectMaintenance(Context context) { this.context = context.getApplicationContext(); }
 
     public void runOnce() {
+        AppLog.i("maintenance", "post-connect maintenance started");
         RelayUpdater updater = new RelayUpdater(context);
-        try { updater.refreshMerged(4); } catch (Exception ignored) {}
-        try { updater.harvestOfficialHtml(16); } catch (Exception ignored) {}
-        try { pruneConfirmedDead(); } catch (Exception ignored) {}
+        try {
+            int pool = updater.refreshMerged(4);
+            AppLog.i("maintenance", "CSV merge finished pool=" + pool);
+        } catch (Exception e) { AppLog.e("maintenance", "CSV refresh failed", e); }
+        try {
+            int pool = updater.harvestOfficialHtml(16);
+            AppLog.i("maintenance", "HTML harvest finished pool=" + pool);
+        } catch (Exception e) { AppLog.e("maintenance", "HTML harvest failed", e); }
+        try { pruneConfirmedDead(); } catch (Exception e) { AppLog.e("maintenance", "prune failed", e); }
+        AppLog.i("maintenance", "post-connect maintenance finished");
     }
 
     private void pruneConfirmedDead() throws Exception {
@@ -42,7 +51,7 @@ public final class PostConnectMaintenance {
 
             OpenVpnProfileUtil.Endpoint ep;
             try { ep = OpenVpnProfileUtil.endpoint(r); } catch (Exception e) { continue; }
-            if (ep == null || !ep.tcp) continue; // do not falsely prune UDP-only nodes
+            if (ep == null || !ep.tcp) continue;
             attempted++;
 
             RelayProbe.Result result = RelayProbe.probe(r, 2200);
@@ -50,9 +59,7 @@ public final class PostConnectMaintenance {
                 health.markAlive(r.ip);
             } else {
                 int failures = health.markFailure(r.ip);
-                if (failures >= FAILURES_BEFORE_PRUNE && (seen == 0L || now - seen >= STALE_MS)) {
-                    remove.add(r.ip);
-                }
+                if (failures >= FAILURES_BEFORE_PRUNE && (seen == 0L || now - seen >= STALE_MS)) remove.add(r.ip);
             }
         }
 
@@ -60,5 +67,6 @@ public final class PostConnectMaintenance {
             store.removeIps(remove);
             for (String ip : remove) health.forget(ip);
         }
+        AppLog.i("maintenance", "prune attempted=" + attempted + " removed=" + remove.size());
     }
 }

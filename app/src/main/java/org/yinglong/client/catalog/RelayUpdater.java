@@ -3,13 +3,14 @@ package org.yinglong.client.catalog;
 import android.content.Context;
 import android.util.Base64;
 
+import org.yinglong.client.diag.AppLog;
+
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
-import java.net.URI;
 import java.net.URL;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
@@ -22,12 +23,7 @@ import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/**
- * Official VPN Gate sources only.
- * 1) CSV API: ready-to-use OpenVPN profiles.
- * 2) Public HTML list: discovers additional OpenVPN-capable relays from the
- *    official site, then downloads their IP-based .ovpn profile.
- */
+/** Official VPN Gate sources only, with persistent diagnostics. */
 public final class RelayUpdater {
     public static final String VPN_GATE_CSV = "https://www.vpngate.net/api/iphone/";
     public static final String VPN_GATE_LIST = "https://www.vpngate.net/en/";
@@ -51,38 +47,40 @@ public final class RelayUpdater {
 
     public int refresh() throws IOException { return refreshMerged(1); }
 
-    /** Multiple samples are merged, never replace the accumulated pool. */
     public int refreshMerged(int rounds) throws IOException {
         int pool = store.read().size();
         IOException last = null;
         int ok = 0;
         int n = Math.max(1, Math.min(rounds, 8));
+        AppLog.i("catalog", "refreshMerged rounds=" + n + " startingPool=" + pool);
         for (int i = 0; i < n; i++) {
             try {
                 String url = VPN_GATE_CSV + "?_yinglong=" + System.currentTimeMillis() + "_" + i;
                 List<Relay> fresh = fetchCsv(url);
+                AppLog.i("catalog", "CSV round=" + (i + 1) + " received=" + fresh.size());
                 pool = store.mergeRelays(fresh, MINIMUM_ACCEPTED_RELAYS);
                 health.markSeen(fresh);
                 ok++;
-            } catch (IOException e) { last = e; }
+            } catch (IOException e) {
+                last = e;
+                AppLog.e("catalog", "CSV round=" + (i + 1) + " failed", e);
+            }
             if (i + 1 < n) {
                 try { Thread.sleep(900L); } catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
             }
         }
         if (ok == 0 && last != null) throw last;
+        AppLog.i("catalog", "refreshMerged complete successfulRounds=" + ok + " pool=" + pool);
         return pool;
     }
 
-    /**
-     * Harvest a limited number of extra profiles from VPN Gate's official HTML
-     * list. This is intentionally bounded to avoid hammering the academic site.
-     */
     public int harvestOfficialHtml(int maxNewProfiles) throws IOException {
         int limit = Math.max(0, Math.min(maxNewProfiles, 24));
         if (limit == 0) return store.read().size();
 
         Set<String> have = new HashSet<>();
         for (Relay r : store.read()) have.add(r.ip);
+        AppLog.i("catalog", "HTML harvest start existing=" + have.size() + " limit=" + limit);
 
         String html = fetchText(VPN_GATE_LIST + "?_yinglong=" + System.currentTimeMillis(), 4L * 1024L * 1024L);
         Matcher m = DETAIL_LINK.matcher(html);
@@ -106,21 +104,23 @@ public final class RelayUpdater {
                 String b64 = Base64.encodeToString(ovpn.getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP);
                 additions.add(new Relay(
                         fqdn == null ? ip : fqdn,
-                        ip,
-                        0L, 0, 0L,
-                        "", "", 0, 0L, 0L, 0L,
+                        ip, 0L, 0, 0L, "", "", 0, 0L, 0L, 0L,
                         "", "VPN Gate official HTML", "harvested after successful session", b64));
                 have.add(ip);
-            } catch (Exception ignored) {
-                // One disappearing volunteer node must not abort the harvest.
+                AppLog.i("catalog", "HTML harvested ip=" + ip);
+            } catch (Exception e) {
+                AppLog.w("catalog", "HTML candidate failed ip=" + ip + " reason=" + e.getClass().getSimpleName());
             }
         }
         if (!additions.isEmpty()) {
             int pool = store.mergeRelays(additions, 1);
             health.markSeen(additions);
+            AppLog.i("catalog", "HTML harvest added=" + additions.size() + " pool=" + pool);
             return pool;
         }
-        return store.read().size();
+        int pool = store.read().size();
+        AppLog.i("catalog", "HTML harvest added=0 pool=" + pool);
+        return pool;
     }
 
     private static List<Relay> fetchCsv(String url) throws IOException {
@@ -155,7 +155,7 @@ public final class RelayUpdater {
         c.setInstanceFollowRedirects(true);
         c.setConnectTimeout(15_000);
         c.setReadTimeout(45_000);
-        c.setRequestProperty("User-Agent", "Yinglong/0.2 (+VPN Gate client)");
+        c.setRequestProperty("User-Agent", "Yinglong/0.2.1 (+VPN Gate client)");
         c.setRequestProperty("Accept", "text/plain,text/csv,text/html,application/x-openvpn-profile,*/*;q=0.1");
         try {
             int code = c.getResponseCode();

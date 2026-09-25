@@ -1,16 +1,20 @@
 package org.yinglong.client;
 
 import android.app.Application;
-import org.yinglong.client.catalog.RelayStore;
 
-/** App bootstrap only. Network work starts only after the user presses START. */
+import org.yinglong.client.catalog.RelayStore;
+import org.yinglong.client.diag.AppLog;
+
 public final class YinglongApp extends Application {
     @Override public void onCreate() {
         super.onCreate();
+        AppLog.init(this);
+        AppLog.i("app", "Yinglong process started");
         try {
             new RelayStore(this).ensureSeeded();
-        } catch (Exception ignored) {
-            // MainActivity will surface a failure when START is pressed.
+            AppLog.i("catalog", "relay seed ready");
+        } catch (Exception e) {
+            AppLog.e("catalog", "failed to seed relay catalogue", e);
         }
     }
 }
