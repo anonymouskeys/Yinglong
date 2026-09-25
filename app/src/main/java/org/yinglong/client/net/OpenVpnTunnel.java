@@ -128,7 +128,7 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
                 (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
 
         createNotificationChannels();
-        selectOpenVpn3Core();
+        setOpenVpn3Enabled(true);
         VpnStatus.addStateListener(this);
         VpnStatus.addLogListener(this);
 
@@ -139,17 +139,28 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
                 + " healthy=" + engineHealthy);
     }
 
-    private void selectOpenVpn3Core() {
+    public boolean setOpenVpn3Enabled(boolean enabled) {
         boolean stored = context.getSharedPreferences(
                         context.getPackageName() + "_preferences",
                         Context.MODE_MULTI_PROCESS | Context.MODE_PRIVATE)
                 .edit()
-                .putBoolean("ovpn3", true)
+                .putBoolean("ovpn3", enabled)
                 .putBoolean("usesystemproxy", false)
                 .commit();
 
-        AppLog.i("engine-v7", "force ovpn3 preference stored=" + stored
-                + " selected=" + VpnProfile.doUseOpenVPN3(context));
+        boolean selected = VpnProfile.doUseOpenVPN3(context);
+        boolean ok = stored && selected == enabled;
+
+        AppLog.i("engine-v8", "engine select requested="
+                + (enabled ? "OpenVPN3" : "OpenVPN2")
+                + " stored=" + stored
+                + " active=" + (selected ? "OpenVPN3" : "OpenVPN2")
+                + " ok=" + ok);
+        return ok;
+    }
+
+    public String selectedEngineName() {
+        return VpnProfile.doUseOpenVPN3(context) ? "OpenVPN3" : "OpenVPN2";
     }
 
     public boolean isPermissionGranted() {
@@ -191,6 +202,8 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
             throw new IllegalStateException("Android VPN permission is not granted");
         }
 
+        hardStopEngine("pre-start " + selectedEngineName(), 900L);
+
         String config = OpenVpnProfileUtil.configWithDirectIp(relay);
         if (config == null || config.trim().isEmpty()) {
             throw new IOException("empty OpenVPN profile");
@@ -202,7 +215,8 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
                 ? "?"
                 : ((endpoint.tcp ? "tcp" : "udp") + ":" + endpoint.port);
 
-        AppLog.i("engine-v7", "prepare relay=" + relay.ip
+        AppLog.i("engine-v8", "prepare engine=" + selectedEngineName()
+                + " relay=" + relay.ip
                 + " endpoint=" + endpointText
                 + " profileChars=" + config.length());
 
@@ -253,7 +267,8 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
         lastFailure = "";
 
         attempt.stage("ENGINE_START", endpointText);
-        AppLog.i("engine-v7", "START OpenVPN3 generation profile=" + attempt.profileUuid
+        AppLog.i("engine-v8", "START " + selectedEngineName()
+                + " profile=" + attempt.profileUuid
                 + " relay=" + relay.ip + " endpoint=" + endpointText);
 
         try {
@@ -269,35 +284,39 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
             return false;
         }
 
-        long overallMs = Math.max(
-                timeoutMs,
-                tcpTransport ? 55_000L : 25_000L
-        );
-        long deadline = SystemClock.elapsedRealtime() + overallMs;
-        long preReplyStallMs = 12_000L;
-        long postReplyStallMs = tcpTransport ? 42_000L : 22_000L;
+        long startedAt = SystemClock.elapsedRealtime();
+        long noReplyMs = tcpTransport ? 12_000L : 10_000L;
+        long repliedMs = Math.max(timeoutMs, tcpTransport ? 42_000L : 28_000L);
+        long noReplyDeadline = startedAt + noReplyMs;
+        long repliedDeadline = startedAt + repliedMs;
+        long postReplyStallMs = tcpTransport ? 30_000L : 20_000L;
 
-        AppLog.i("engine-v7", "watchdog relay=" + relay.ip
-                + " overallMs=" + overallMs
-                + " preReplyMs=" + preReplyStallMs
-                + " postReplyMs=" + postReplyStallMs);
+        AppLog.i("engine-v8", "watchdog engine=" + selectedEngineName()
+                + " relay=" + relay.ip
+                + " noReplyMs=" + noReplyMs
+                + " repliedMs=" + repliedMs
+                + " postReplyStallMs=" + postReplyStallMs);
 
         boolean signalled = false;
         try {
             while (!(signalled = attempt.done.await(250L, TimeUnit.MILLISECONDS))) {
                 long now = SystemClock.elapsedRealtime();
                 long idle = now - attempt.lastProgressAt;
-                long stallLimit =
-                        attempt.serverReplied ? postReplyStallMs : preReplyStallMs;
 
-                if (idle >= stallLimit) {
-                    attempt.failure = "stalled " + idle
+                if (!attempt.serverReplied && now >= noReplyDeadline) {
+                    attempt.failure = "no server reply after " + noReplyMs
                             + " ms at " + attempt.lastStage;
                     break;
                 }
 
-                if (now >= deadline) {
-                    attempt.failure = "overall timeout after " + overallMs
+                if (attempt.serverReplied && idle >= postReplyStallMs) {
+                    attempt.failure = "server replied but stalled " + idle
+                            + " ms at " + attempt.lastStage;
+                    break;
+                }
+
+                if (attempt.serverReplied && now >= repliedDeadline) {
+                    attempt.failure = "reply-phase timeout after " + repliedMs
                             + " ms at " + attempt.lastStage;
                     break;
                 }
@@ -318,6 +337,8 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
             if (currentAttempt == attempt) {
                 currentAttempt = null;
             }
+            hardStopEngine("timeout " + selectedEngineName()
+                    + " relay=" + relay.ip, 1_600L);
             return false;
         }
 
@@ -329,6 +350,8 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
             if (currentAttempt == attempt) {
                 currentAttempt = null;
             }
+            hardStopEngine("failed " + selectedEngineName()
+                    + " relay=" + relay.ip, 1_600L);
             return false;
         }
 
@@ -342,11 +365,15 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
             if (currentAttempt == attempt) {
                 currentAttempt = null;
             }
-            AppLog.w("engine-v4", attempt.failure + " relay=" + relay.ip);
+            AppLog.w("engine-v8", attempt.failure + " relay=" + relay.ip);
+            hardStopEngine("verify failed " + selectedEngineName()
+                    + " relay=" + relay.ip, 1_600L);
             return false;
         }
 
-        AppLog.i("engine-v7", "CONNECTED+VERIFIED relay=" + relay.ip
+        AppLog.i("engine-v8", "CONNECTED+VERIFIED engine="
+                + selectedEngineName()
+                + " relay=" + relay.ip
                 + " profile=" + attempt.profileUuid);
         attempt.stage("CONNECTED", relay.ip);
         return true;
@@ -375,7 +402,22 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
             lost.countDown();
         }
 
-        requestNativeStop(false, 1_500L);
+        hardStopEngine("disconnect", 1_800L);
+    }
+
+    private void hardStopEngine(String reason, long waitMs) {
+        AppLog.i("engine-v8", "hard-stop begin reason=" + reason);
+
+        requestNativeStop(false, Math.min(waitMs, 1_200L));
+
+        try {
+            context.stopService(new Intent(context, OpenVPNService.class));
+        } catch (Throwable e) {
+            AppLog.e("engine-v8", "stopService failed reason=" + reason, e);
+        }
+
+        SystemClock.sleep(Math.max(250L, Math.min(waitMs, 1_200L)));
+        AppLog.i("engine-v8", "hard-stop end reason=" + reason);
     }
 
     private void requestNativeStop(boolean replaceConnection, long waitMs) {
@@ -651,10 +693,10 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
             profile.mCustomConfigOptions = extra;
         }
 
-        AppLog.i("engine-v7",
-                "OpenVPN3 compatibility legacyAlgorithms=true"
-                        + " nonPreferredDC=true tlsCertProfile=legacy"
-                        + " tlsMin=1.0 newline=real retryMax=0");
+        AppLog.i("engine-v8",
+                "compat engine=" + selectedEngineName()
+                        + " legacyProvider=true tlsCertProfile=legacy"
+                        + " tlsMin=1.0 retryMax=0");
     }
 
     private static boolean containsCipher(String list, String cipher) {
