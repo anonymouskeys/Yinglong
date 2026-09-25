@@ -128,11 +128,28 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
                 (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
 
         createNotificationChannels();
+        selectOpenVpn3Core();
         VpnStatus.addStateListener(this);
         VpnStatus.addLogListener(this);
 
         engineHealthy = validateEngineInstall();
-        AppLog.i("engine-v4", "OpenVPN single-owner engine initialized healthy=" + engineHealthy);
+        OpenVpnEngineDiagnostics.startup(context);
+        AppLog.i("engine-v7", "OpenVPN3 Core initialized selected="
+                + VpnProfile.doUseOpenVPN3(context)
+                + " healthy=" + engineHealthy);
+    }
+
+    private void selectOpenVpn3Core() {
+        boolean stored = context.getSharedPreferences(
+                        context.getPackageName() + "_preferences",
+                        Context.MODE_MULTI_PROCESS | Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean("ovpn3", true)
+                .putBoolean("usesystemproxy", false)
+                .commit();
+
+        AppLog.i("engine-v7", "force ovpn3 preference stored=" + stored
+                + " selected=" + VpnProfile.doUseOpenVPN3(context));
     }
 
     public boolean isPermissionGranted() {
@@ -185,7 +202,7 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
                 ? "?"
                 : ((endpoint.tcp ? "tcp" : "udp") + ":" + endpoint.port);
 
-        AppLog.i("engine-v4", "prepare relay=" + relay.ip
+        AppLog.i("engine-v7", "prepare relay=" + relay.ip
                 + " endpoint=" + endpointText
                 + " profileChars=" + config.length());
 
@@ -196,7 +213,6 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
             profile = parser.convertProfile();
 
             applyVpnGateCompatibility(profile);
-            applyPacketSizeCompatibility(profile);
         } catch (Throwable e) {
             lastFailure = "profile parse: " + e.getClass().getSimpleName()
                     + ": " + safe(e.getMessage());
@@ -207,6 +223,8 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
         profile.mName = "Yinglong " + safe(relay.countryShort) + " " + relay.ip;
         profile.mBlockUnusedAddressFamilies = true;
         profile.mPersistTun = false;
+
+        OpenVpnEngineDiagnostics.profile(relay, profile, config, endpoint);
 
         int check = profile.checkProfile(context);
         if (check != R.string.no_error_found) {
@@ -235,7 +253,7 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
         lastFailure = "";
 
         attempt.stage("ENGINE_START", endpointText);
-        AppLog.i("engine-v4", "START generation profile=" + attempt.profileUuid
+        AppLog.i("engine-v7", "START OpenVPN3 generation profile=" + attempt.profileUuid
                 + " relay=" + relay.ip + " endpoint=" + endpointText);
 
         try {
@@ -253,13 +271,13 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
 
         long overallMs = Math.max(
                 timeoutMs,
-                tcpTransport ? 45_000L : 20_000L
+                tcpTransport ? 55_000L : 25_000L
         );
         long deadline = SystemClock.elapsedRealtime() + overallMs;
-        long preReplyStallMs = 8_000L;
-        long postReplyStallMs = tcpTransport ? 32_000L : 18_000L;
+        long preReplyStallMs = 12_000L;
+        long postReplyStallMs = tcpTransport ? 42_000L : 22_000L;
 
-        AppLog.i("engine-v4", "watchdog relay=" + relay.ip
+        AppLog.i("engine-v7", "watchdog relay=" + relay.ip
                 + " overallMs=" + overallMs
                 + " preReplyMs=" + preReplyStallMs
                 + " postReplyMs=" + postReplyStallMs);
@@ -291,7 +309,7 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
 
         if (!signalled) {
             lastFailure = attempt.failure;
-            AppLog.w("engine-v4", "attempt timeout relay=" + relay.ip
+            AppLog.w("engine-v7", "attempt timeout relay=" + relay.ip
                     + " reason=" + attempt.failure
                     + " serverReplied=" + attempt.serverReplied);
 
@@ -305,7 +323,7 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
 
         if (!attempt.success) {
             lastFailure = attempt.failure;
-            AppLog.w("engine-v4", "attempt failed relay=" + relay.ip
+            AppLog.w("engine-v7", "attempt failed relay=" + relay.ip
                     + " reason=" + attempt.failure);
             attempt.stage("FAILED", attempt.failure);
             if (currentAttempt == attempt) {
@@ -328,7 +346,7 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
             return false;
         }
 
-        AppLog.i("engine-v4", "CONNECTED+VERIFIED relay=" + relay.ip
+        AppLog.i("engine-v7", "CONNECTED+VERIFIED relay=" + relay.ip
                 + " profile=" + attempt.profileUuid);
         attempt.stage("CONNECTED", relay.ip);
         return true;
@@ -549,6 +567,7 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
             }
 
             AppLog.i("openvpn-v4", line);
+            OpenVpnEngineDiagnostics.signal(line);
 
             Attempt attempt = currentAttempt;
             if (attempt == null) {
@@ -580,7 +599,10 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
                     || low.contains("certificate verify failed")
                     || low.contains("options error")
                     || low.contains("cannot load")
-                    || low.contains("fatal error")) {
+                    || low.contains("fatal error")
+                    || low.contains("event(error)")
+                    || low.contains("connect() error")
+                    || low.contains("config file parse error")) {
                 attempt.failure = line;
                 lastFailure = line;
                 attempt.progress("ENGINE_ERROR", line);
@@ -597,32 +619,15 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
         }
     }
 
-    private void applyPacketSizeCompatibility(VpnProfile profile) {
-        String extra = safe(profile.mCustomConfigOptions);
-        String low = extra.toLowerCase(Locale.US);
-
-        if (!low.contains("max-packet-size")) {
-            if (!extra.isEmpty() && !extra.endsWith("\n")) {
-                extra += "\n";
-            }
-            extra += "max-packet-size 1000\n";
-        }
-
-        profile.mUseCustomConfig = true;
-        profile.mCustomConfigOptions = extra;
-    }
-
     private void applyVpnGateCompatibility(VpnProfile profile) {
         /*
-         * v0.6.0 aggressive VPN Gate compatibility mode.
-         *
-         * OpenVPN 2.6+ defaults to TLS 1.2, but VPN Gate still contains old
-         * OpenVPN peers that require TLS 1.0, SHA-1 era certs/ciphers or BF-CBC.
-         * CA and remote-cert-tls verification remain enabled.
+         * v0.7.0 runs OpenVPN3 Core from the ics-openvpn ovpn23 build.
+         * These fields map to OpenVPN3 native compatibility switches instead
+         * of OpenVPN 2.x/OpenSSL command-line cipher syntax.
          */
         profile.mCompatMode = 20306;
         profile.mUseLegacyProvider = true;
-        profile.mTlSCertProfile = "insecure";
+        profile.mTlSCertProfile = "legacy";
         profile.mConnectRetryMax = "0";
         profile.mConnectRetry = "1";
         profile.mConnectRetryMaxTime = "4";
@@ -639,35 +644,17 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
 
         String extra = safe(profile.mCustomConfigOptions);
         String low = extra.toLowerCase(Locale.US);
-
         if (!low.contains("tls-version-min")) {
-            if (!extra.isEmpty() && !extra.endsWith("\n")) extra += "\n";
-            extra += "tls-version-min 1.0\n";
+            if (!extra.isEmpty() && !extra.endsWith("\\n")) extra += "\\n";
+            extra += "tls-version-min 1.0\\n";
+            profile.mUseCustomConfig = true;
+            profile.mCustomConfigOptions = extra;
         }
 
-        if (!low.contains("tls-cipher")) {
-            if (!extra.isEmpty() && !extra.endsWith("\n")) extra += "\n";
-            extra += "tls-cipher DEFAULT:@SECLEVEL=0\n";
-        }
-
-        if (!low.contains("tls-exit")) {
-            if (!extra.isEmpty() && !extra.endsWith("\n")) extra += "\n";
-            extra += "tls-exit\n";
-        }
-
-        if (!low.contains("auth-nocache")) {
-            if (!extra.isEmpty() && !extra.endsWith("\n")) extra += "\n";
-            extra += "auth-nocache\n";
-        }
-
-        profile.mUseCustomConfig = true;
-        profile.mCustomConfigOptions = extra;
-
-        AppLog.i("engine-v4",
-                "VPN Gate aggressive compatibility:"
-                        + " compat=2.3.6 tlsMin=1.0"
-                        + " tlsCertProfile=insecure legacyProvider=true"
-                        + " tlsCipher=DEFAULT:@SECLEVEL=0 retryMax=0");
+        AppLog.i("engine-v7",
+                "OpenVPN3 compatibility legacyAlgorithms=true"
+                        + " nonPreferredDC=true tlsCertProfile=legacy"
+                        + " tlsMin=1.0 retryMax=0");
     }
 
     private static boolean containsCipher(String list, String cipher) {
@@ -724,6 +711,8 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
     private boolean validateEngineInstall() {
         boolean serviceOk = false;
         boolean nativeOk = false;
+        boolean bridgeOk = false;
+        boolean selected = false;
 
         try {
             context.getPackageManager().getServiceInfo(
@@ -732,24 +721,43 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
             );
             serviceOk = true;
         } catch (Throwable t) {
-            AppLog.e("engine-v4", "OpenVPNService missing", t);
+            AppLog.e("engine-v7", "OpenVPNService missing", t);
+        }
+
+        try {
+            Class.forName(
+                    "de.blinkt.openvpn.core.OpenVPNThreadv3",
+                    false,
+                    context.getClassLoader()
+            );
+            bridgeOk = true;
+        } catch (Throwable t) {
+            AppLog.e("engine-v7", "OpenVPN3 Java bridge missing", t);
         }
 
         try {
             String nativeDir = context.getApplicationInfo().nativeLibraryDir;
-            File exec = new File(nativeDir, "libovpnexec.so");
+            File ovpn3 = new File(nativeDir, "libovpn3.so");
+            File ovpn2 = new File(nativeDir, "libovpnexec.so");
 
-            nativeOk = exec.isFile() && exec.length() > 0L;
+            nativeOk = ovpn3.isFile() && ovpn3.length() > 0L;
 
-            AppLog.i("engine-v4", "nativeLibraryDir=" + nativeDir
-                    + " libovpnexec=" + exec.exists()
-                    + " bytes=" + (exec.exists() ? exec.length() : 0L)
+            AppLog.i("engine-v7", "nativeLibraryDir=" + nativeDir
+                    + " libovpn3=" + ovpn3.exists()
+                    + " ovpn3Bytes=" + (ovpn3.exists() ? ovpn3.length() : 0L)
+                    + " libovpnexec=" + ovpn2.exists()
                     + " abis=" + Arrays.toString(Build.SUPPORTED_ABIS));
         } catch (Throwable t) {
-            AppLog.e("engine-v4", "native OpenVPN check failed", t);
+            AppLog.e("engine-v7", "native OpenVPN3 check failed", t);
         }
 
-        return serviceOk && nativeOk;
+        try {
+            selected = VpnProfile.doUseOpenVPN3(context);
+        } catch (Throwable t) {
+            AppLog.e("engine-v7", "OpenVPN3 selection check failed", t);
+        }
+
+        return serviceOk && nativeOk && bridgeOk && selected;
     }
 
     private void createNotificationChannels() {

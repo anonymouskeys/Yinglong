@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Yinglong v0.6.0 aggressive VPN Gate session:
+ * Yinglong v0.7.0 OpenVPN3 Core VPN Gate session:
  * native SoftEther first, official VPN Gate OpenVPN profile as fallback.
  */
 public final class VpnSessionManager {
@@ -264,13 +264,13 @@ public final class VpnSessionManager {
                     try { sstp.disconnect(); } catch (Throwable ignored) {}
 
                     setState(State.SEARCHING,
-                            "OpenVPN legacy-compatible: проверяю relay…");
+                            "OpenVPN3 Core: проверяю relay…");
                     AppLog.w("session",
-                            "starting aggressive OpenVPN VPN Gate engine");
+                            "starting OpenVPN3 Core VPN Gate engine");
 
                     if (connectedRelay == null && openVpn.engineHealthy()) {
                         setState(State.SEARCHING,
-                                "SSTP не найден. Проверяю OpenVPN relay…");
+                                "OpenVPN3 Core: ранжирую relay…");
 
                         List<RelayProbe.Result> ovpnCandidates = RelayProbe.rank(
                                 relays,
@@ -307,7 +307,7 @@ public final class VpnSessionManager {
 
                             final String endpoint = (result.tcp ? "tcp:" : "udp:")
                                     + result.port;
-                            final String base = "OpenVPN " + ovpnAttempt + "/"
+                            final String base = "OpenVPN3 " + ovpnAttempt + "/"
                                     + Math.min(OPENVPN_MAX_ATTEMPTS, ovpnCandidates.size())
                                     + " • " + safe(relay.countryShort) + " " + relay.ip
                                     + " • " + endpoint;

@@ -108,6 +108,7 @@ jobs:
           unzip -l "$APK" | tee /tmp/apk-list.txt
           grep -q 'lib/arm64-v8a/libsoftether.so' /tmp/apk-list.txt
           grep -q 'lib/arm64-v8a/libovpnexec.so' /tmp/apk-list.txt
+          grep -q 'lib/arm64-v8a/libovpn3.so' /tmp/apk-list.txt
 
           MANIFEST="$(find app/build/intermediates -type f -name AndroidManifest.xml | grep -E 'merged_manifest|merged_manifests' | head -n 1 || true)"
           if [ -z "$MANIFEST" ]; then
@@ -119,7 +120,7 @@ jobs:
           grep -q 'kittoku.osc.service.SstpVpnService' "$MANIFEST"
           grep -q 'android.permission.BIND_VPN_SERVICE' "$MANIFEST"
           grep -q 'android.permission.FOREGROUND_SERVICE_SPECIAL_USE' "$MANIFEST"
-          echo "SoftEther VPN engine packaging checks passed"
+          echo "SoftEther + OpenVPN3 engine packaging checks passed"
 
       - name: Prepare artifact
         shell: bash

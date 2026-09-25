@@ -59,16 +59,8 @@ public final class OpenVpnProfileUtil {
         }
         m.appendTail(out);
 
-        // v0.6.0 owns TLS compatibility explicitly. Remove only TLS-version/
-        // TLS-cipher/provider overrides from the downloaded profile so an old
-        // relay cannot force a stricter/incompatible value back on top.
-        String cfgOut = out.toString();
-        cfgOut = cfgOut.replaceAll(
-                "(?mi)^\\s*(?:tls-version-min|tls-version-max|tls-cert-profile|"
-                        + "tls-cipher|tls-ciphersuites|compat-mode|providers)"
-                        + "\\b[^\\r\\n]*(?:\\r?\\n|$)",
-                ""
-        );
-        return cfgOut;
+        // v0.7.0 uses OpenVPN3 Core. Preserve the VPN Gate profile exactly
+        // as published and only replace the remote DNS name with the relay IP.
+        return out.toString();
     }
 }
