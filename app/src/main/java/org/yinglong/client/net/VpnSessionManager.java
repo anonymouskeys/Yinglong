@@ -5,6 +5,7 @@ import android.content.SharedPreferences;
 
 import org.yinglong.client.catalog.Relay;
 import org.yinglong.client.catalog.RelayStore;
+import org.yinglong.client.catalog.RelayUpdater;
 import org.yinglong.client.diag.AppLog;
 
 import java.util.HashSet;
@@ -112,9 +113,31 @@ public final class VpnSessionManager {
     private void runSession(long token) {
         boolean maintenanceStarted = false;
         String lastFailure = "";
+        List<Relay> bootstrapRelays = null;
         try {
+            if (active(token)) {
+                setState(State.SEARCHING, "Обновляю свежий список VPN Gate…");
+                try {
+                    bootstrapRelays = new RelayUpdater(context).bootstrapFresh();
+                    AppLog.i("session", "bootstrap fresh relay pool=" + bootstrapRelays.size());
+                    setState(State.SEARCHING, "Свежий список получен: " + bootstrapRelays.size() + " relay");
+                } catch (Throwable e) {
+                    AppLog.w("session", "bootstrap refresh unavailable; using local fallback: "
+                            + e.getClass().getSimpleName() + ": " + safe(e.getMessage()));
+                    setState(State.SEARCHING, "Свежий список недоступен — использую локальный резерв");
+                }
+            }
+
             while (active(token)) {
-                List<Relay> relays = new RelayStore(context).read();
+                List<Relay> relays;
+                if (bootstrapRelays != null && !bootstrapRelays.isEmpty()) {
+                    relays = bootstrapRelays;
+                    bootstrapRelays = null;
+                    AppLog.i("session", "using fresh bootstrap pool size=" + relays.size());
+                } else {
+                    relays = new RelayStore(context).read();
+                    AppLog.i("session", "using persistent fallback pool size=" + relays.size());
+                }
                 AppLog.i("session", "relay pool size=" + relays.size());
                 if (relays.isEmpty()) throw new IllegalStateException("локальный пул relay пуст");
 

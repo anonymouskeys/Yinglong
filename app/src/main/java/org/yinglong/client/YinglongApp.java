@@ -12,13 +12,13 @@ public final class YinglongApp extends Application {
         super.onCreate();
         AppLog.init(this);
         AppLog.installCrashHandler(this);
-        AppLog.i("app", "Yinglong process started v0.3.4 sdk=" + Build.VERSION.SDK_INT
+        AppLog.i("app", "Yinglong process started v0.3.5 sdk=" + Build.VERSION.SDK_INT
                 + " device=" + Build.MANUFACTURER + " " + Build.MODEL);
         try {
             RelayStore store = new RelayStore(this);
             store.ensureSeeded();
-            int count = store.mergeBundledSeed();
-            AppLog.i("catalog", "bundled seed merged; active pool=" + count);
+            int count = store.read().size();
+            AppLog.i("catalog", "relay catalogue ready; active pool=" + count);
         } catch (Throwable e) {
             AppLog.e("catalog", "failed to seed/merge relay catalogue", e);
         }

@@ -47,6 +47,24 @@ public final class RelayUpdater {
 
     public int refresh() throws IOException { return refreshMerged(1); }
 
+    /**
+     * Fetch a short-timeout snapshot before the first VPN attempt.
+     * The returned list contains only relays from the live VPN Gate API, while the same
+     * snapshot is also merged into the persistent pool for future fallback.
+     */
+    public List<Relay> bootstrapFresh() throws IOException {
+        String url = VPN_GATE_CSV + "?_yinglong_bootstrap=" + System.currentTimeMillis();
+        AppLog.i("catalog", "bootstrap refresh start");
+        List<Relay> fresh = fetchCsv(url, 5_000, 10_000);
+        if (fresh.size() < MINIMUM_ACCEPTED_RELAYS) {
+            throw new IOException("Bootstrap relay snapshot rejected: only " + fresh.size() + " valid entries");
+        }
+        int pool = store.mergeRelays(fresh, MINIMUM_ACCEPTED_RELAYS);
+        health.markSeen(fresh);
+        AppLog.i("catalog", "bootstrap refresh received=" + fresh.size() + " mergedPool=" + pool);
+        return fresh;
+    }
+
     public int refreshMerged(int rounds) throws IOException {
         int pool = store.read().size();
         IOException last = null;
@@ -124,7 +142,11 @@ public final class RelayUpdater {
     }
 
     private static List<Relay> fetchCsv(String url) throws IOException {
-        byte[] body = fetchBytes(url, MAX_BODY);
+        return fetchCsv(url, 15_000, 45_000);
+    }
+
+    private static List<Relay> fetchCsv(String url, int connectTimeoutMs, int readTimeoutMs) throws IOException {
+        byte[] body = fetchBytes(url, MAX_BODY, connectTimeoutMs, readTimeoutMs);
         return RelayCsv.parse(new InputStreamReader(new ByteArrayInputStream(body), StandardCharsets.UTF_8));
     }
 
@@ -151,11 +173,15 @@ public final class RelayUpdater {
     }
 
     private static byte[] fetchBytes(String url, long max) throws IOException {
+        return fetchBytes(url, max, 15_000, 45_000);
+    }
+
+    private static byte[] fetchBytes(String url, long max, int connectTimeoutMs, int readTimeoutMs) throws IOException {
         HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
         c.setInstanceFollowRedirects(true);
-        c.setConnectTimeout(15_000);
-        c.setReadTimeout(45_000);
-        c.setRequestProperty("User-Agent", "Yinglong/0.2.1 (+VPN Gate client)");
+        c.setConnectTimeout(Math.max(1_000, connectTimeoutMs));
+        c.setReadTimeout(Math.max(1_000, readTimeoutMs));
+        c.setRequestProperty("User-Agent", "Yinglong/0.3.5 (+VPN Gate client)");
         c.setRequestProperty("Accept", "text/plain,text/csv,text/html,application/x-openvpn-profile,*/*;q=0.1");
         try {
             int code = c.getResponseCode();

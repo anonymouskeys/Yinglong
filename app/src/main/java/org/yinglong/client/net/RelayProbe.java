@@ -112,7 +112,7 @@ public final class RelayProbe {
         }
 
         if (!ep.tcp) {
-            AppLog.i("probe", "udp candidate retained ip=" + r.ip + " port=" + ep.port);
+            AppLog.i("probe", "udp unverified fallback ip=" + r.ip + " port=" + ep.port);
             return new Result(r, Long.MAX_VALUE / 8, false, false, ep.port);
         }
 
