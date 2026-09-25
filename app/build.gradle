@@ -10,8 +10,8 @@ android {
         applicationId 'org.yinglong.client'
         minSdk 24
         targetSdk 35
-        versionCode 3
-        versionName '0.2.1'
+        versionCode 4
+        versionName '0.3.0'
     }
 
     buildTypes {
@@ -21,8 +21,22 @@ android {
         }
     }
 
+    // ics-openvpn launches its bundled native OpenVPN executable from nativeLibraryDir.
+    // Modern AGP otherwise leaves JNI libs compressed/unextractable for this use case.
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+}
+
+dependencies {
+    implementation files("${rootDir}/third_party/icsopenvpn-0.7.55-myst.aar")
+    implementation 'androidx.annotation:annotation:1.9.1'
+    implementation 'androidx.core:core-ktx:1.13.1'
 }

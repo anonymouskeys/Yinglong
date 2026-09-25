@@ -11,7 +11,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -27,6 +27,17 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
+
+      - name: Fetch pinned OpenVPN Android backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p third_party
+          URL="https://raw.githubusercontent.com/mysteriumnetwork/openvpn_dart/7ac4d91f5e401f2802c6942dcb868a476236cdcd/android/localmaven/network/mysterium/openvpn/icsopenvpn/0.7.55-myst/icsopenvpn-0.7.55-myst.aar"
+          curl --fail --location --retry 3 --connect-timeout 20 "$URL" \
+            -o third_party/icsopenvpn-0.7.55-myst.aar
+          echo "1da7a6068d0bda22fef4b8ec7a887c07ab456e65c1246ea9a7533c4676891454  third_party/icsopenvpn-0.7.55-myst.aar" \
+            | sha256sum -c -
 
       - name: Build debug APK
         run: gradle --no-daemon :app:assembleDebug
