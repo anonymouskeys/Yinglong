@@ -17,7 +17,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Yinglong v0.3.9: local catalogue -> SoftEther TCP probe -> native SoftEther TLS -> DHCP -> VpnService.
+ * Yinglong v0.3.10: local catalogue -> SoftEther TCP probe -> VPNGATE auth fallback -> DHCP -> VpnService.
  * No catalogue refresh happens on START.
  */
 public final class VpnSessionManager {

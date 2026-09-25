@@ -10,6 +10,7 @@ import org.yinglong.client.MainActivity
 import org.yinglong.client.catalog.Relay
 import org.yinglong.client.diag.AppLog
 import vn.unlimit.softether.SoftEtherVpnService
+import vn.unlimit.softether.model.AuthMethod
 import vn.unlimit.softether.model.ConnectionConfig
 import java.io.File
 import java.util.concurrent.CountDownLatch
@@ -31,6 +32,7 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
     private class Attempt(
         val relay: Relay,
         val port: Int,
+        val authLabel: String,
         val progress: Progress?
     ) {
         val done = CountDownLatch(1)
@@ -44,6 +46,12 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
             progress?.onProgress(stage, message)
         }
     }
+
+    private data class AuthVariant(
+        val label: String,
+        val password: String,
+        val method: AuthMethod
+    )
 
     init {
         healthy = validateInstall()
@@ -66,18 +74,80 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
     fun lastFailure(): String = failure
 
     fun connectBlocking(relay: Relay, port: Int, timeoutMs: Long, progress: Progress?): Boolean {
+        // VPN Gate's SoftEther hub is VPNGATE/user vpn.  In the wild two client
+        // conventions exist: anonymous login (the actual hub account type) and
+        // vpn/vpn password login.  Try both on the SAME endpoint before throwing
+        // a good TLS listener away.
+        val variants = arrayOf(
+            AuthVariant("ANONYMOUS", "", AuthMethod.ANONYMOUS),
+            AuthVariant("PASSWORD", "vpn", AuthMethod.AUTO)
+        )
+        val perVariantTimeout = (timeoutMs / variants.size)
+            .coerceAtLeast(7_000L)
+            .coerceAtMost(12_000L)
+
+        var lastReason = ""
+        for ((index, variant) in variants.withIndex()) {
+            AppLog.i(
+                "se-auth",
+                "auth attempt ${index + 1}/${variants.size} mode=${variant.label} " +
+                    "hub=VPNGATE user=vpn relay=${relay.ip} port=$port"
+            )
+
+            if (connectVariant(relay, port, perVariantTimeout, variant, progress)) {
+                return true
+            }
+
+            lastReason = failure
+            val authRelated = lastReason.contains("AUTH", ignoreCase = true) ||
+                lastReason.contains("authentication", ignoreCase = true)
+
+            if (index + 1 < variants.size && authRelated) {
+                AppLog.w(
+                    "se-auth",
+                    "mode=${variant.label} failed at auth; retrying same endpoint with " +
+                        variants[index + 1].label + " reason=$lastReason"
+                )
+                progress?.onProgress(
+                    "AUTH_FALLBACK",
+                    "${variant.label} не ответил • пробую ${variants[index + 1].label}"
+                )
+                continue
+            }
+
+            if (!authRelated) {
+                AppLog.w(
+                    "se-auth",
+                    "failure is not auth-related; no credential fallback reason=$lastReason"
+                )
+            }
+            break
+        }
+
+        if (lastReason.isNotBlank()) failure = lastReason
+        return false
+    }
+
+    private fun connectVariant(
+        relay: Relay,
+        port: Int,
+        timeoutMs: Long,
+        variant: AuthVariant,
+        progress: Progress?
+    ): Boolean {
         failure = ""
         stopInternal(900L)
 
-        val attempt = Attempt(relay, port, progress)
+        val attempt = Attempt(relay, port, variant.label, progress)
         currentAttempt = attempt
 
         val config = ConnectionConfig(
             serverHost = relay.ip,
             serverPort = port,
             username = "vpn",
-            password = "vpn",
-            virtualHub = "vpngate",
+            password = variant.password,
+            virtualHub = "VPNGATE",
+            authMethod = variant.method,
             sessionName = "Yinglong ${relay.countryShort} ${relay.ip}",
             localAddress = "10.21.0.2",
             prefixLength = 19,
@@ -88,11 +158,11 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
             useUdp = false,
             udpPort = 0,
             udpOnly = false,
-            connectTimeoutMs = 7000,
+            connectTimeoutMs = timeoutMs.coerceIn(5_000L, 9_000L).toInt(),
             country = relay.countryShort ?: "",
             clientProductName = "Yinglong",
-            clientVersion = "0.3.9",
-            clientBuild = 13
+            clientVersion = "0.3.10",
+            clientBuild = 14
         )
 
         val intent = Intent(appContext, SoftEtherVpnService::class.java).apply {
@@ -100,8 +170,16 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
             putExtra(SoftEtherVpnService.EXTRA_CONFIG, config)
         }
 
-        AppLog.i("se-tunnel", "START SoftEther relay=${relay.ip} port=$port")
-        attempt.stage("ENGINE_START", "SoftEther TLS tcp:$port")
+        val passwordState = if (variant.password.isEmpty()) "<empty>" else "<set>"
+        AppLog.i(
+            "se-tunnel",
+            "START SoftEther relay=${relay.ip} port=$port auth=${variant.label} " +
+                "hub=VPNGATE password=$passwordState"
+        )
+        attempt.stage(
+            "ENGINE_START",
+            "SoftEther TLS tcp:$port • VPNGATE/${variant.label}"
+        )
 
         try {
             ContextCompat.startForegroundService(appContext, intent)
@@ -112,7 +190,7 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
             return false
         }
 
-        val deadline = SystemClock.elapsedRealtime() + timeoutMs.coerceAtLeast(5000L)
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs.coerceAtLeast(5_000L)
         var signaled = false
         try {
             while (!signaled && SystemClock.elapsedRealtime() < deadline) {
@@ -124,7 +202,7 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
         }
 
         if (!signaled) {
-            failure = "SoftEther timeout at ${attempt.lastStage}"
+            failure = "SoftEther timeout at ${attempt.lastStage} auth=${variant.label}"
             AppLog.w("se-tunnel", "$failure relay=${relay.ip} port=$port")
             attempt.stage("TIMEOUT", failure)
             stopInternal(1400L)
@@ -132,13 +210,21 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
         }
 
         if (!attempt.success) {
-            if (failure.isBlank()) failure = "SoftEther failed at ${attempt.lastStage}"
-            AppLog.w("se-tunnel", "connect failed relay=${relay.ip} port=$port reason=$failure")
+            if (failure.isBlank()) {
+                failure = "SoftEther failed at ${attempt.lastStage} auth=${variant.label}"
+            }
+            AppLog.w(
+                "se-tunnel",
+                "connect failed relay=${relay.ip} port=$port auth=${variant.label} reason=$failure"
+            )
             stopInternal(1400L)
             return false
         }
 
-        AppLog.i("se-tunnel", "CONNECTED relay=${relay.ip} port=$port")
+        AppLog.i(
+            "se-tunnel",
+            "CONNECTED relay=${relay.ip} port=$port auth=${variant.label}"
+        )
         return true
     }
 
@@ -167,7 +253,7 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
             SoftEtherVpnService.STATE_CONNECTING -> attempt?.stage("CONNECTING", "TCP соединение")
             SoftEtherVpnService.STATE_TLS_HANDSHAKE -> attempt?.stage("TLS", "SoftEther TLS handshake")
             SoftEtherVpnService.STATE_PROTOCOL_HANDSHAKE -> attempt?.stage("SOFTETHER", "SoftEther protocol handshake")
-            SoftEtherVpnService.STATE_AUTHENTICATING -> attempt?.stage("AUTH", "VPN Gate vpn/vpn")
+            SoftEtherVpnService.STATE_AUTHENTICATING -> attempt?.stage("AUTH", "VPNGATE • vpn • ${attempt.authLabel}")
             SoftEtherVpnService.STATE_SESSION_SETUP -> attempt?.stage("SESSION", "сессия + DHCP")
             SoftEtherVpnService.STATE_CONNECTED -> {
                 connected = true
@@ -193,8 +279,13 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
             }
             SoftEtherVpnService.STATE_DISCONNECTED -> {
                 if (attempt != null && attempt.sawStart && attempt.done.count > 0) {
-                    failure = "SoftEther disconnected after ${attempt.lastStage}"
-                    attempt.stage("DISCONNECTED", failure)
+                    if (attempt.lastStage == "TIMEOUT" && failure.isNotBlank()) {
+                        AppLog.i("se-tunnel", "disconnect after timeout; preserving reason=$failure")
+                        attempt.stage("DISCONNECTED", failure)
+                    } else {
+                        failure = "SoftEther disconnected after ${attempt.lastStage} auth=${attempt.authLabel}"
+                        attempt.stage("DISCONNECTED", failure)
+                    }
                     attempt.success = false
                     attempt.done.countDown()
                 }

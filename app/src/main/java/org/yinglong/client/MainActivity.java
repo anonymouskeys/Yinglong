@@ -50,7 +50,7 @@ public final class MainActivity extends Activity {
     @Override protected void onCreate(Bundle stateBundle) {
         super.onCreate(stateBundle);
         AppLog.init(this);
-        AppLog.i("ui", "MainActivity created; v0.3.9 SoftEther TLS-first build");
+        AppLog.i("ui", "MainActivity created; v0.3.10 SoftEther VPNGATE dual-auth build");
         manager = VpnSessionManager.get(this);
         setContentView(buildUi());
     }
