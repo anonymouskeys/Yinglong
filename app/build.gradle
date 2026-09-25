@@ -10,8 +10,8 @@ android {
         applicationId 'org.yinglong.client'
         minSdk 24
         targetSdk 35
-        versionCode 5
-        versionName '0.3.1'
+        versionCode 6
+        versionName '0.3.2'
     }
 
     buildTypes {
@@ -21,7 +21,6 @@ android {
         }
     }
 
-    // ics-openvpn executes libovpnexec.so from nativeLibraryDir.
     packagingOptions {
         jniLibs {
             useLegacyPackaging = true

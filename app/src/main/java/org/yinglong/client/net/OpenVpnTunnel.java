@@ -38,11 +38,14 @@ import de.blinkt.openvpn.core.VpnStatus;
 
 /** Application-facing wrapper around the embedded ics-openvpn engine. */
 public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.LogListener {
+    public interface ProgressListener {
+        void onStage(String stage, String message);
+    }
+
     private static volatile OpenVpnTunnel instance;
 
     private final Context context;
     private final ConnectivityManager connectivity;
-    private final Object lock = new Object();
     private volatile Attempt currentAttempt;
     private volatile CountDownLatch connectionLost = new CountDownLatch(0);
     private volatile boolean connected;
@@ -54,10 +57,21 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
         final Relay relay;
         final CountDownLatch done = new CountDownLatch(1);
         final long launchedAt = SystemClock.elapsedRealtime();
+        final ProgressListener progress;
         volatile boolean success;
         volatile boolean sawProgress;
         volatile String failure = "not connected";
-        Attempt(Relay relay) { this.relay = relay; }
+
+        Attempt(Relay relay, ProgressListener progress) {
+            this.relay = relay;
+            this.progress = progress;
+        }
+
+        void stage(String stage, String message) {
+            if (progress == null) return;
+            try { progress.onStage(stage, message == null ? "" : message); }
+            catch (Throwable ignored) {}
+        }
     }
 
     public static OpenVpnTunnel get(Context context) {
@@ -88,19 +102,25 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
     public boolean engineHealthy() { return engineHealthy; }
 
     public boolean connectBlocking(Relay relay, long timeoutMs) throws Exception {
+        return connectBlocking(relay, timeoutMs, null);
+    }
+
+    public boolean connectBlocking(Relay relay, long timeoutMs, ProgressListener progress) throws Exception {
         if (relay == null) throw new IllegalArgumentException("relay == null");
         if (!engineHealthy) throw new IllegalStateException("OpenVPN engine self-check failed; see log");
         if (!isPermissionGranted()) throw new IllegalStateException("Android VPN permission is not granted");
 
-        if (connected || currentAttempt != null) stopEngine(1200L);
+        // Always tear down a stale service/tun from a previous attempt/process before a new relay.
+        // This is cheap when nothing is running and prevents an old session from blocking failover.
+        stopEngine(650L);
 
         String config = OpenVpnProfileUtil.configWithDirectIp(relay);
         if (config == null || config.trim().isEmpty()) throw new IOException("empty OpenVPN profile");
 
         OpenVpnProfileUtil.Endpoint endpoint = OpenVpnProfileUtil.endpoint(relay);
-        AppLog.i("tunnel", "profile relay=" + relay.ip
-                + " endpoint=" + (endpoint == null ? "?" : ((endpoint.tcp ? "tcp" : "udp") + ":" + endpoint.port))
-                + " chars=" + config.length());
+        String endpointText = endpoint == null ? "?" : ((endpoint.tcp ? "tcp" : "udp") + ":" + endpoint.port);
+        AppLog.i("tunnel", "profile relay=" + relay.ip + " endpoint=" + endpointText + " chars=" + config.length());
+        if (progress != null) progress.onStage("PROFILE", endpointText);
 
         VpnProfile profile;
         try {
@@ -115,7 +135,8 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
 
         profile.mName = "Yinglong " + safe(relay.countryShort) + " " + relay.ip;
         profile.mBlockUnusedAddressFamilies = true;
-        profile.mPersistTun = true;
+        // Important for failover: do NOT keep a stale TUN across our separate relay attempts.
+        profile.mPersistTun = false;
 
         int check = profile.checkProfile(context);
         if (check != R.string.no_error_found) {
@@ -125,26 +146,25 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
             lastFailure = message;
             throw new IOException(message);
         }
+        if (progress != null) progress.onStage("PROFILE_OK", endpointText);
 
-        // Force ProfileManager initialization before saving the temporary profile. This mirrors
-        // the library's normal app lifecycle and avoids lazy-init races on some devices/ROMs.
         ProfileManager.getInstance(context);
         ProfileManager.setTemporaryProfile(context, profile);
 
-        Attempt attempt = new Attempt(relay);
-        synchronized (lock) {
-            currentAttempt = attempt;
-            connected = false;
-            activeRelay = null;
-            lastFailure = "";
-        }
+        Attempt attempt = new Attempt(relay, progress);
+        currentAttempt = attempt;
+        connected = false;
+        activeRelay = null;
+        lastFailure = "";
 
         AppLog.i("tunnel", "START OpenVPN relay=" + relay.ip + " country=" + safe(relay.countryShort));
+        attempt.stage("ENGINE_START", "запускаю OpenVPN");
         try {
-            // false = do not replace another running VPN behind Android's back. We cleanly stop our
-            // previous attempt before this call; this matches the reference openvpn_dart backend.
-            VPNLaunchHelper.startOpenVpn(profile, context, "Yinglong", false);
+            // replace_running_vpn=true makes a stale ics-openvpn instance replaceable instead of
+            // silently refusing a new profile during rapid failover.
+            VPNLaunchHelper.startOpenVpn(profile, context, "Yinglong", true);
             AppLog.i("tunnel", "startOpenVpn returned relay=" + relay.ip);
+            attempt.stage("ENGINE_STARTED", "жду OpenVPN state");
         } catch (Throwable t) {
             attempt.failure = "startOpenVpn exception: " + t.getClass().getSimpleName() + ": " + safe(t.getMessage());
             lastFailure = attempt.failure;
@@ -166,26 +186,31 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
             attempt.failure = "connect timeout after " + timeoutMs + " ms";
             lastFailure = attempt.failure;
             AppLog.w("tunnel", attempt.failure + " relay=" + relay.ip + " sawProgress=" + attempt.sawProgress);
-            stopEngine(1200L);
+            attempt.stage("TIMEOUT", attempt.failure);
+            stopEngine(650L);
             return false;
         }
 
         if (!attempt.success) {
             lastFailure = attempt.failure;
             AppLog.w("tunnel", "connect failed relay=" + relay.ip + " reason=" + attempt.failure);
-            stopEngine(1200L);
+            attempt.stage("FAILED", attempt.failure);
+            stopEngine(650L);
             return false;
         }
 
-        if (!waitForAndroidVpnTransport(6000L)) {
+        attempt.stage("VERIFY_ANDROID", "проверяю TRANSPORT_VPN");
+        if (!waitForAndroidVpnTransport(4500L)) {
             attempt.failure = "OpenVPN said CONNECTED but Android TRANSPORT_VPN did not appear";
             lastFailure = attempt.failure;
             AppLog.w("tunnel", attempt.failure + " relay=" + relay.ip);
-            stopEngine(1200L);
+            attempt.stage("VERIFY_FAILED", attempt.failure);
+            stopEngine(650L);
             return false;
         }
 
         AppLog.i("tunnel", "CONNECTED+VERIFIED relay=" + relay.ip);
+        attempt.stage("CONNECTED", relay.ip);
         return true;
     }
 
@@ -194,7 +219,7 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
         if (connected && latch != null) latch.await();
     }
 
-    public void disconnect() { stopEngine(1200L); }
+    public void disconnect() { stopEngine(650L); }
 
     private void stopEngine(long waitMs) {
         Attempt attempt = currentAttempt;
@@ -217,7 +242,7 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
                 try {
                     IOpenVPNServiceInternal service = IOpenVPNServiceInternal.Stub.asInterface(binder);
                     if (service != null) {
-                        boolean requested = service.stopVPN(false);
+                        boolean requested = service.stopVPN(true);
                         AppLog.i("tunnel", "stopVPN sent result=" + requested);
                     }
                 } catch (Throwable e) {
@@ -255,6 +280,8 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
         Attempt attempt = currentAttempt;
         if (attempt == null) return;
 
+        attempt.stage(s, msg);
+
         if (level == ConnectionStatus.LEVEL_CONNECTED) {
             attempt.sawProgress = true;
             connected = true;
@@ -279,11 +306,11 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
 
         if (!terminal) return;
 
-        // A stale DISCONNECTED/NOPROCESS callback from the previous service instance can race with
-        // a new attempt. Ignore it until this attempt has shown progress, for a short grace window.
-        long age = SystemClock.elapsedRealtime() - attempt.launchedAt;
-        if (level == ConnectionStatus.LEVEL_NOTCONNECTED && !attempt.sawProgress && age < 2500L) {
-            AppLog.w("ovpn-state", "ignoring stale NOTCONNECTED ageMs=" + age + " relay=" + attempt.relay.ip);
+        // Any NOTCONNECTED before this attempt has produced its first actual OpenVPN progress is
+        // treated as a stale callback from teardown. The watchdog timeout will catch a true no-start.
+        if (level == ConnectionStatus.LEVEL_NOTCONNECTED && !attempt.sawProgress) {
+            long age = SystemClock.elapsedRealtime() - attempt.launchedAt;
+            AppLog.w("ovpn-state", "ignoring pre-progress NOTCONNECTED ageMs=" + age + " relay=" + attempt.relay.ip);
             return;
         }
 
@@ -330,9 +357,9 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
                 }
             } catch (Throwable t) {
                 AppLog.e("tunnel", "VPN transport verification failed", t);
-                return true; // Do not reject a working OpenVPN solely because OEM introspection failed.
+                return true;
             }
-            try { Thread.sleep(150L); }
+            try { Thread.sleep(120L); }
             catch (InterruptedException e) { Thread.currentThread().interrupt(); return false; }
         } while (SystemClock.elapsedRealtime() < deadline);
         return false;

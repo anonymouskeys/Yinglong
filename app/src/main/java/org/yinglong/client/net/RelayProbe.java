@@ -8,21 +8,18 @@ import java.net.Socket;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.concurrent.CompletionService;
+import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
-/** Fast direct reachability probes before opening the expensive VPN handshake. */
+/** Bounded direct reachability probes used before tunnel connection. */
 public final class RelayProbe {
     private RelayProbe() {}
 
-    private static final class Seed {
-        final Relay relay;
-        final OpenVpnProfileUtil.Endpoint endpoint;
-        Seed(Relay relay, OpenVpnProfileUtil.Endpoint endpoint) {
-            this.relay = relay;
-            this.endpoint = endpoint;
-        }
+    public interface ProgressListener {
+        void onProgress(int done, int total, int accepted, int rejected);
     }
 
     public static final class Result {
@@ -31,6 +28,7 @@ public final class RelayProbe {
         public final boolean liveTcp;
         public final boolean tcp;
         public final int port;
+
         Result(Relay relay, long connectMs, boolean liveTcp, boolean tcp, int port) {
             this.relay = relay;
             this.connectMs = connectMs;
@@ -41,76 +39,80 @@ public final class RelayProbe {
     }
 
     public static List<Result> rank(List<Relay> relays, int maxCandidates, int concurrency, int timeoutMs) {
+        return rank(relays, maxCandidates, concurrency, timeoutMs, null);
+    }
+
+    public static List<Result> rank(List<Relay> relays, int maxCandidates, int concurrency, int timeoutMs,
+                                    ProgressListener progress) {
         AppLog.i("probe", "rank start pool=" + relays.size() + " max=" + maxCandidates
                 + " concurrency=" + concurrency + " timeoutMs=" + timeoutMs);
 
-        List<Seed> seeds = new ArrayList<>();
-        for (Relay r : relays) {
-            try {
-                OpenVpnProfileUtil.Endpoint ep = OpenVpnProfileUtil.endpoint(r);
-                if (ep != null) seeds.add(new Seed(r, ep));
-            } catch (Throwable e) {
-                AppLog.e("probe", "profile endpoint parse failed ip=" + r.ip, e);
-            }
-        }
+        List<Relay> seed = new ArrayList<>(relays);
+        seed.sort(Comparator
+                .comparingLong((Relay r) -> r.score).reversed()
+                .thenComparingInt(r -> r.pingMs <= 0 ? Integer.MAX_VALUE : r.pingMs));
+        if (seed.size() > maxCandidates) seed = new ArrayList<>(seed.subList(0, maxCandidates));
 
-        // In heavily filtered networks TCP/443 deserves first shot. Then other TCP. UDP is kept
-        // as a fallback because a TCP connect probe cannot prove UDP reachability.
-        seeds.sort(Comparator
-                .comparingInt((Seed s) -> transportPriority(s.endpoint))
-                .thenComparing((Seed s) -> s.relay.score, Comparator.reverseOrder())
-                .thenComparingInt(s -> s.relay.pingMs <= 0 ? Integer.MAX_VALUE : s.relay.pingMs));
-
-        if (seeds.size() > maxCandidates) seeds = new ArrayList<>(seeds.subList(0, maxCandidates));
-
-        ExecutorService pool = Executors.newFixedThreadPool(Math.max(1, Math.min(concurrency, 16)));
-        List<Future<Result>> futures = new ArrayList<>();
-        for (Seed s : seeds) futures.add(pool.submit(() -> probe(s.relay, s.endpoint, timeoutMs)));
-        pool.shutdown();
+        int workers = Math.max(1, Math.min(concurrency, 20));
+        ExecutorService pool = Executors.newFixedThreadPool(workers);
+        CompletionService<Result> completion = new ExecutorCompletionService<>(pool);
+        for (Relay relay : seed) completion.submit(() -> probe(relay, timeoutMs));
 
         List<Result> out = new ArrayList<>();
-        int failed = 0;
-        for (Future<Result> f : futures) {
-            try {
-                Result r = f.get();
-                if (r != null) out.add(r); else failed++;
-            } catch (Throwable e) {
-                failed++;
-                AppLog.e("probe", "probe future failed", e);
+        int rejected = 0;
+        int done = 0;
+        try {
+            while (done < seed.size()) {
+                Future<Result> f = completion.take();
+                done++;
+                try {
+                    Result r = f.get();
+                    if (r != null) out.add(r); else rejected++;
+                } catch (Throwable e) {
+                    rejected++;
+                    AppLog.e("probe", "probe future failed", e);
+                }
+                if (progress != null) {
+                    try { progress.onProgress(done, seed.size(), out.size(), rejected); }
+                    catch (Throwable e) { AppLog.e("probe", "progress callback failed", e); }
+                }
             }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            AppLog.w("probe", "rank interrupted done=" + done + "/" + seed.size());
+        } finally {
+            pool.shutdownNow();
         }
 
-        out.sort(Comparator
-                .comparingInt(RelayProbe::resultPriority)
-                .thenComparingLong(r -> r.liveTcp ? r.connectMs : Long.MAX_VALUE / 4)
-                .thenComparing((Result r) -> r.relay.score, Comparator.reverseOrder()));
+        out.sort((a, b) -> {
+            int pa = transportPriority(a);
+            int pb = transportPriority(b);
+            if (pa != pb) return Integer.compare(pa, pb);
+            if (a.liveTcp && b.liveTcp && a.connectMs != b.connectMs) return Long.compare(a.connectMs, b.connectMs);
+            int scoreCmp = Long.compare(b.relay.score, a.relay.score);
+            if (scoreCmp != 0) return scoreCmp;
+            return Integer.compare(a.relay.pingMs, b.relay.pingMs);
+        });
 
-        AppLog.i("probe", "rank done candidates=" + seeds.size() + " accepted=" + out.size() + " rejected=" + failed);
-        int preview = Math.min(12, out.size());
-        for (int i = 0; i < preview; i++) {
-            Result r = out.get(i);
-            AppLog.i("probe", "rank #" + (i + 1) + " ip=" + r.relay.ip
-                    + " proto=" + (r.tcp ? "tcp" : "udp") + " port=" + r.port
-                    + " liveTcp=" + r.liveTcp + " connectMs=" + r.connectMs
-                    + " pubScore=" + r.relay.score);
-        }
+        AppLog.i("probe", "rank done candidates=" + seed.size() + " accepted=" + out.size() + " rejected=" + rejected);
         return out;
     }
 
     public static Result probe(Relay r, int timeoutMs) {
         OpenVpnProfileUtil.Endpoint ep;
-        try { ep = OpenVpnProfileUtil.endpoint(r); }
-        catch (Throwable e) {
+        try {
+            ep = OpenVpnProfileUtil.endpoint(r);
+        } catch (Throwable e) {
             AppLog.e("probe", "profile parse failed ip=" + r.ip, e);
             return null;
         }
-        if (ep == null) return null;
-        return probe(r, ep, timeoutMs);
-    }
+        if (ep == null) {
+            AppLog.w("probe", "no endpoint in profile ip=" + r.ip);
+            return null;
+        }
 
-    private static Result probe(Relay r, OpenVpnProfileUtil.Endpoint ep, int timeoutMs) {
         if (!ep.tcp) {
-            AppLog.i("probe", "udp fallback retained ip=" + r.ip + " port=" + ep.port);
+            AppLog.i("probe", "udp candidate retained ip=" + r.ip + " port=" + ep.port);
             return new Result(r, Long.MAX_VALUE / 8, false, false, ep.port);
         }
 
@@ -121,23 +123,15 @@ public final class RelayProbe {
             AppLog.i("probe", "tcp ok ip=" + r.ip + " port=" + ep.port + " connectMs=" + ms);
             return new Result(r, ms, true, true, ep.port);
         } catch (Throwable e) {
-            AppLog.w("probe", "tcp fail ip=" + r.ip + " port=" + ep.port
-                    + " reason=" + e.getClass().getSimpleName() + ": " + safe(e.getMessage()));
+            AppLog.w("probe", "tcp fail ip=" + r.ip + " port=" + ep.port + " reason=" + e.getClass().getSimpleName());
             return null;
         }
     }
 
-    private static int transportPriority(OpenVpnProfileUtil.Endpoint ep) {
-        if (ep.tcp && ep.port == 443) return 0;
-        if (ep.tcp) return 1;
-        return 2;
+    private static int transportPriority(Result r) {
+        if (r.liveTcp && r.tcp && r.port == 443) return 0;
+        if (r.liveTcp && r.tcp) return 1;
+        if (!r.tcp) return 2;
+        return 3;
     }
-
-    private static int resultPriority(Result r) {
-        if (r.liveTcp && r.port == 443) return 0;
-        if (r.liveTcp) return 1;
-        return 2;
-    }
-
-    private static String safe(String v) { return v == null ? "" : v; }
 }

@@ -6,15 +6,16 @@ import org.yinglong.client.catalog.Relay;
 import org.yinglong.client.catalog.RelayStore;
 import org.yinglong.client.diag.AppLog;
 
-import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
-/** User-scoped VPN session: rank -> connect -> maintain -> fail over. */
+/** User-scoped VPN session: fast probe -> connect -> extended probe -> maintain -> fail over. */
 public final class VpnSessionManager {
     public enum State { IDLE, SEARCHING, CONNECTING, CONNECTED, STOPPING, ERROR }
 
@@ -32,9 +33,12 @@ public final class VpnSessionManager {
     private volatile State state = State.IDLE;
     private volatile String detail = "";
 
-    private static final int MAX_RANK_INPUT = 180;
-    private static final int MAX_CONNECT_ATTEMPTS_PER_ROUND = 28;
-    private static final long CONNECT_TIMEOUT_MS = 11_000L;
+    private static final int FAST_SCAN = 64;
+    private static final int FULL_SCAN = 180;
+    private static final int FAST_ATTEMPTS = 10;
+    private static final int FULL_ATTEMPTS = 28;
+    private static final long TCP_CONNECT_TIMEOUT_MS = 9_500L;
+    private static final long UDP_CONNECT_TIMEOUT_MS = 12_500L;
 
     public static VpnSessionManager get(Context context) {
         VpnSessionManager local = instance;
@@ -80,7 +84,7 @@ public final class VpnSessionManager {
             return;
         }
         long token = generation.incrementAndGet();
-        setState(State.SEARCHING, "starting");
+        setState(State.SEARCHING, "Запуск диагностики…");
         AppLog.i("session", "user session START token=" + token);
         sessionWorker.execute(() -> runSession(token));
     }
@@ -89,7 +93,7 @@ public final class VpnSessionManager {
         AppLog.i("session", "stop() called state=" + state + " running=" + running.get());
         if (!running.getAndSet(false) && state == State.IDLE) return;
         generation.incrementAndGet();
-        setState(State.STOPPING, "user stop");
+        setState(State.STOPPING, "Останавливаю OpenVPN…");
         tunnel.disconnect();
         setState(State.IDLE, "");
     }
@@ -99,82 +103,117 @@ public final class VpnSessionManager {
         String lastFailure = "";
         try {
             while (active(token)) {
-                setState(State.SEARCHING, "ranking relays");
                 List<Relay> relays = new RelayStore(context).read();
                 AppLog.i("session", "relay pool size=" + relays.size());
+                if (relays.isEmpty()) throw new IllegalStateException("локальный пул relay пуст");
 
-                List<RelayProbe.Result> ranked = RelayProbe.rank(relays, MAX_RANK_INPUT, 14, 1600);
-                if (ranked.isEmpty()) throw new IllegalStateException("нет достижимых relay");
-                AppLog.i("session", "ranked candidates=" + ranked.size());
-
-                List<Relay> candidates = new ArrayList<>();
-                for (RelayProbe.Result result : ranked) {
-                    if (result == null || result.relay == null) continue;
-                    candidates.add(result.relay);
-                    if (candidates.size() >= MAX_CONNECT_ATTEMPTS_PER_ROUND) break;
-                }
-
+                Set<String> tried = new HashSet<>();
                 boolean connectedThisRound = false;
-                int attemptNumber = 0;
-                for (Relay relay : candidates) {
-                    if (!active(token)) return;
-                    attemptNumber++;
-                    setState(State.CONNECTING, relay.countryShort + " " + relay.ip);
-                    AppLog.i("session", "attempt " + attemptNumber + "/" + candidates.size()
-                            + " relay=" + relay.ip + " country=" + relay.countryShort);
+                Relay connectedRelay = null;
 
-                    boolean ok;
-                    try {
-                        ok = tunnel.connectBlocking(relay, CONNECT_TIMEOUT_MS);
-                    } catch (Throwable e) {
-                        lastFailure = e.getClass().getSimpleName() + ": " + safe(e.getMessage());
-                        AppLog.e("session", "attempt exception relay=" + relay.ip, e);
-                        ok = false;
+                int[] scanLimits = {Math.min(FAST_SCAN, relays.size()), Math.min(FULL_SCAN, relays.size())};
+                int[] attemptLimits = {FAST_ATTEMPTS, FULL_ATTEMPTS};
+                int[] probeTimeouts = {900, 1450};
+
+                phaseLoop:
+                for (int phase = 0; phase < scanLimits.length && active(token); phase++) {
+                    int scan = scanLimits[phase];
+                    if (scan <= 0) continue;
+                    String phaseName = phase == 0 ? "быстрая" : "расширенная";
+                    setState(State.SEARCHING, "Начинаю " + phaseName + " проверку: 0/" + scan);
+
+                    final int phaseIndex = phase;
+                    List<RelayProbe.Result> ranked = RelayProbe.rank(
+                            relays, scan, phase == 0 ? 18 : 16, probeTimeouts[phase],
+                            (done, total, accepted, rejected) -> {
+                                if (!active(token)) return;
+                                if (done == total || done == 1 || done % 4 == 0) {
+                                    setState(State.SEARCHING,
+                                            "Проверено " + done + "/" + total
+                                                    + " • доступно " + accepted
+                                                    + " • мимо " + rejected
+                                                    + (phaseIndex == 0 ? " • fast" : " • full"));
+                                }
+                            });
+
+                    if (ranked.isEmpty()) {
+                        AppLog.w("session", phaseName + " scan produced no reachable/rankable relays");
+                        continue;
                     }
+                    AppLog.i("session", phaseName + " ranked candidates=" + ranked.size());
 
-                    if (!ok) {
-                        if (!tunnel.lastFailure().isEmpty()) lastFailure = tunnel.lastFailure();
-                        AppLog.w("session", "attempt failed relay=" + relay.ip + " reason=" + lastFailure);
+                    int attempted = 0;
+                    for (RelayProbe.Result result : ranked) {
+                        if (!active(token)) return;
+                        if (result == null || result.relay == null) continue;
+                        Relay relay = result.relay;
+                        if (!tried.add(relay.ip)) continue;
+                        if (attempted >= attemptLimits[phase]) break;
+                        attempted++;
+
+                        String transport = result.tcp ? "tcp:" + result.port : "udp:" + result.port;
+                        String base = "Попытка " + attempted + "/" + attemptLimits[phase]
+                                + " • " + safe(relay.countryShort) + " " + relay.ip
+                                + " • " + transport;
+                        setState(State.CONNECTING, base);
+                        AppLog.i("session", base);
+
+                        long connectTimeout = result.tcp ? TCP_CONNECT_TIMEOUT_MS : UDP_CONNECT_TIMEOUT_MS;
+                        boolean ok;
+                        try {
+                            ok = tunnel.connectBlocking(relay, connectTimeout, (stage, message) -> {
+                                if (!active(token)) return;
+                                String m = message == null || message.isEmpty() ? "" : " • " + message;
+                                setState(State.CONNECTING, base + "\n" + stage + m);
+                            });
+                        } catch (Throwable e) {
+                            lastFailure = e.getClass().getSimpleName() + ": " + safe(e.getMessage());
+                            AppLog.e("session", "attempt exception relay=" + relay.ip, e);
+                            ok = false;
+                        }
+
+                        if (!ok) {
+                            if (!tunnel.lastFailure().isEmpty()) lastFailure = tunnel.lastFailure();
+                            AppLog.w("session", "attempt failed relay=" + relay.ip + " reason=" + lastFailure);
+                            continue;
+                        }
+
+                        connectedThisRound = true;
+                        connectedRelay = relay;
+                        break phaseLoop;
                     }
-
-                    if (!active(token)) {
-                        tunnel.disconnect();
-                        return;
-                    }
-                    if (!ok) continue;
-
-                    connectedThisRound = true;
-                    setState(State.CONNECTED, relay.countryShort + " " + relay.ip);
-                    AppLog.i("session", "session CONNECTED relay=" + relay.ip);
-
-                    if (!maintenanceStarted) {
-                        maintenanceStarted = true;
-                        maintenanceWorker.execute(() -> {
-                            if (!active(token)) return;
-                            AppLog.i("maintenance", "post-connect relay maintenance started");
-                            try {
-                                new PostConnectMaintenance(context).runOnce();
-                                int size = new RelayStore(context).read().size();
-                                AppLog.i("maintenance", "post-connect relay maintenance finished; pool=" + size);
-                            } catch (Throwable e) {
-                                AppLog.e("maintenance", "post-connect relay maintenance failed", e);
-                            }
-                        });
-                    }
-
-                    try { tunnel.awaitConnectionLoss(); }
-                    catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
-
-                    if (!active(token)) return;
-                    AppLog.w("session", "tunnel lost; automatic failover begins");
-                    setState(State.SEARCHING, "failover");
-                    break;
                 }
 
-                if (!connectedThisRound) {
-                    throw new IllegalStateException("не удалось подключиться к " + candidates.size()
-                            + " relay; последняя причина: " + (lastFailure.isEmpty() ? "unknown" : lastFailure));
+                if (!connectedThisRound || connectedRelay == null) {
+                    throw new IllegalStateException("не удалось подключиться; последняя причина: "
+                            + (lastFailure.isEmpty() ? "нет ответа OpenVPN" : lastFailure));
                 }
+
+                final Relay sessionRelay = connectedRelay;
+                setState(State.CONNECTED, safe(sessionRelay.countryShort) + " " + sessionRelay.ip);
+                AppLog.i("session", "session CONNECTED relay=" + sessionRelay.ip);
+
+                if (!maintenanceStarted) {
+                    maintenanceStarted = true;
+                    maintenanceWorker.execute(() -> {
+                        if (!active(token)) return;
+                        AppLog.i("maintenance", "post-connect relay maintenance started");
+                        try {
+                            new PostConnectMaintenance(context).runOnce();
+                            int size = new RelayStore(context).read().size();
+                            AppLog.i("maintenance", "post-connect relay maintenance finished; pool=" + size);
+                        } catch (Throwable e) {
+                            AppLog.e("maintenance", "post-connect relay maintenance failed", e);
+                        }
+                    });
+                }
+
+                try { tunnel.awaitConnectionLoss(); }
+                catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
+
+                if (!active(token)) return;
+                AppLog.w("session", "tunnel lost; automatic failover begins");
+                setState(State.SEARCHING, "Туннель потерян. Перебираю relay заново…");
             }
         } catch (Throwable e) {
             AppLog.e("session", "session failed", e);
@@ -196,7 +235,7 @@ public final class VpnSessionManager {
     private void setState(State next, String message) {
         state = next;
         detail = message == null ? "" : message;
-        AppLog.i("state", next + (detail.isEmpty() ? "" : " " + detail));
+        AppLog.i("state", next + (detail.isEmpty() ? "" : " " + detail.replace('\n', ' ')));
         for (Listener listener : listeners) {
             try { listener.onState(next, detail); }
             catch (Throwable e) { AppLog.e("state", "listener failed", e); }
