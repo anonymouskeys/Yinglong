@@ -196,9 +196,7 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
             profile = parser.convertProfile();
 
             applyVpnGateCompatibility(profile);
-            if (!tcpTransport) {
-                applyUdpMtuRescue(profile);
-            }
+            applyPacketSizeCompatibility(profile);
         } catch (Throwable e) {
             lastFailure = "profile parse: " + e.getClass().getSimpleName()
                     + ": " + safe(e.getMessage());
@@ -255,11 +253,11 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
 
         long overallMs = Math.max(
                 timeoutMs,
-                tcpTransport ? 75_000L : 60_000L
+                tcpTransport ? 45_000L : 20_000L
         );
         long deadline = SystemClock.elapsedRealtime() + overallMs;
-        long preReplyStallMs = tcpTransport ? 15_000L : 10_000L;
-        long postReplyStallMs = tcpTransport ? 65_000L : 55_000L;
+        long preReplyStallMs = 8_000L;
+        long postReplyStallMs = tcpTransport ? 32_000L : 18_000L;
 
         AppLog.i("engine-v4", "watchdog relay=" + relay.ip
                 + " overallMs=" + overallMs
@@ -577,19 +575,29 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
             } else if (line.contains("Initialization Sequence Completed")) {
                 attempt.progress("INIT_COMPLETE", "OpenVPN initialized");
             } else if (low.contains("auth_failed")
+                    || low.contains("unsupported protocol")
                     || low.contains("tls error")
                     || low.contains("certificate verify failed")
                     || low.contains("options error")
                     || low.contains("cannot load")
                     || low.contains("fatal error")) {
+                attempt.failure = line;
+                lastFailure = line;
                 attempt.progress("ENGINE_ERROR", line);
+
+                // Do not let one obsolete/dead relay consume OpenVPN's own
+                // exponential retry loop. Move to the next relay immediately.
+                if (attempt.done.getCount() > 0) {
+                    attempt.success = false;
+                    attempt.done.countDown();
+                }
             }
         } catch (Throwable e) {
             AppLog.e("openvpn-v4", "failed to process engine log", e);
         }
     }
 
-    private void applyUdpMtuRescue(VpnProfile profile) {
+    private void applyPacketSizeCompatibility(VpnProfile profile) {
         String extra = safe(profile.mCustomConfigOptions);
         String low = extra.toLowerCase(Locale.US);
 
@@ -605,9 +613,20 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
     }
 
     private void applyVpnGateCompatibility(VpnProfile profile) {
-        if (profile.mCompatMode <= 0) {
-            profile.mCompatMode = 20307;
-        }
+        /*
+         * v0.6.0 aggressive VPN Gate compatibility mode.
+         *
+         * OpenVPN 2.6+ defaults to TLS 1.2, but VPN Gate still contains old
+         * OpenVPN peers that require TLS 1.0, SHA-1 era certs/ciphers or BF-CBC.
+         * CA and remote-cert-tls verification remain enabled.
+         */
+        profile.mCompatMode = 20306;
+        profile.mUseLegacyProvider = true;
+        profile.mTlSCertProfile = "insecure";
+        profile.mConnectRetryMax = "0";
+        profile.mConnectRetry = "1";
+        profile.mConnectRetryMaxTime = "4";
+        profile.mExpectTLSCert = true;
 
         String cipher = safe(profile.mCipher).trim();
         String dataCiphers = safe(profile.mDataCiphers).trim();
@@ -618,13 +637,37 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
                     : dataCiphers + ":" + cipher;
         }
 
-        profile.mUseLegacyProvider = true;
+        String extra = safe(profile.mCustomConfigOptions);
+        String low = extra.toLowerCase(Locale.US);
 
-        if (safe(profile.mTlSCertProfile).trim().isEmpty()) {
-            profile.mTlSCertProfile = "legacy";
+        if (!low.contains("tls-version-min")) {
+            if (!extra.isEmpty() && !extra.endsWith("\n")) extra += "\n";
+            extra += "tls-version-min 1.0\n";
         }
 
-        profile.mExpectTLSCert = true;
+        if (!low.contains("tls-cipher")) {
+            if (!extra.isEmpty() && !extra.endsWith("\n")) extra += "\n";
+            extra += "tls-cipher DEFAULT:@SECLEVEL=0\n";
+        }
+
+        if (!low.contains("tls-exit")) {
+            if (!extra.isEmpty() && !extra.endsWith("\n")) extra += "\n";
+            extra += "tls-exit\n";
+        }
+
+        if (!low.contains("auth-nocache")) {
+            if (!extra.isEmpty() && !extra.endsWith("\n")) extra += "\n";
+            extra += "auth-nocache\n";
+        }
+
+        profile.mUseCustomConfig = true;
+        profile.mCustomConfigOptions = extra;
+
+        AppLog.i("engine-v4",
+                "VPN Gate aggressive compatibility:"
+                        + " compat=2.3.6 tlsMin=1.0"
+                        + " tlsCertProfile=insecure legacyProvider=true"
+                        + " tlsCipher=DEFAULT:@SECLEVEL=0 retryMax=0");
     }
 
     private static boolean containsCipher(String list, String cipher) {

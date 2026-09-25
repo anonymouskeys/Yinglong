@@ -58,6 +58,17 @@ public final class OpenVpnProfileUtil {
             m.appendReplacement(out, Matcher.quoteReplacement(replacement));
         }
         m.appendTail(out);
-        return out.toString();
+
+        // v0.6.0 owns TLS compatibility explicitly. Remove only TLS-version/
+        // TLS-cipher/provider overrides from the downloaded profile so an old
+        // relay cannot force a stricter/incompatible value back on top.
+        String cfgOut = out.toString();
+        cfgOut = cfgOut.replaceAll(
+                "(?mi)^\\s*(?:tls-version-min|tls-version-max|tls-cert-profile|"
+                        + "tls-cipher|tls-ciphersuites|compat-mode|providers)"
+                        + "\\b[^\\r\\n]*(?:\\r?\\n|$)",
+                ""
+        );
+        return cfgOut;
     }
 }

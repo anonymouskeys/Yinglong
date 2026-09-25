@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Yinglong v0.5.1 hybrid session:
+ * Yinglong v0.6.0 aggressive VPN Gate session:
  * native SoftEther first, official VPN Gate OpenVPN profile as fallback.
  */
 public final class VpnSessionManager {
@@ -48,9 +48,9 @@ public final class VpnSessionManager {
     private static final long SOFTETHER_ATTEMPT_TIMEOUT_MS = 55_000L;
     private static final int SSTP_MAX_ATTEMPTS = 8;
     private static final long SSTP_ATTEMPT_TIMEOUT_MS = 30_000L;
-    private static final int OPENVPN_MAX_ATTEMPTS = 24;
-    private static final long OPENVPN_TCP_TIMEOUT_MS = 75_000L;
-    private static final long OPENVPN_UDP_TIMEOUT_MS = 60_000L;
+    private static final int OPENVPN_MAX_ATTEMPTS = 40;
+    private static final long OPENVPN_TCP_TIMEOUT_MS = 45_000L;
+    private static final long OPENVPN_UDP_TIMEOUT_MS = 20_000L;
 
     public static VpnSessionManager get(Context context) {
         VpnSessionManager local = instance;
@@ -256,103 +256,17 @@ public final class VpnSessionManager {
                     }
                 }
 
-                // 2) Probe real TCP endpoints once, then try MS-SSTP first.
-                // SSTP rides a normal TLS/HTTP exchange and bypasses the OpenVPN
-                // control handshake that this mobile path is currently stalling.
-                if (connectedRelay == null && active(token)
-                        && (sstp.engineHealthy() || openVpn.engineHealthy())) {
+                // 2) v0.6.0: go straight to aggressive OpenVPN.
+                // The protocol-level SSTP scan found zero usable endpoints on
+                // this pool, so do not spend time scanning that transport.
+                if (connectedRelay == null && active(token) && openVpn.engineHealthy()) {
                     try { softEther.disconnect(); } catch (Throwable ignored) {}
+                    try { sstp.disconnect(); } catch (Throwable ignored) {}
 
                     setState(State.SEARCHING,
-                            "Проверяю TCP relay для SSTP/OpenVPN…");
+                            "OpenVPN legacy-compatible: проверяю relay…");
                     AppLog.w("session",
-                            "starting SSTP-first multi-transport fallback");
-
-                    if (sstp.engineHealthy()) {
-                        setState(State.SEARCHING,
-                                "Ищу настоящий SSTP (TLS + HTTP 200)…");
-
-                        List<SstpProbe.Result> sstpCandidates = SstpProbe.rank(
-                                relays,
-                                relays.size(),
-                                32,
-                                800,
-                                2500,
-                                (done, total, accepted) -> {
-                                    if (!active(token)) return;
-                                    if (done == total || done == 1 || done % 40 == 0) {
-                                        setState(State.SEARCHING,
-                                                "SSTP probe: " + done + "/" + total
-                                                        + " • настоящих " + accepted);
-                                    }
-                                });
-
-                        AppLog.i("session", "real SSTP candidates="
-                                + sstpCandidates.size());
-
-                        int sstpAttempt = 0;
-
-                        for (SstpProbe.Result result : sstpCandidates) {
-                            if (!active(token)) return;
-                            if (result == null || result.relay == null) continue;
-                            if (sstpAttempt >= SSTP_MAX_ATTEMPTS) break;
-
-                            sstpAttempt++;
-                            Relay relay = result.relay;
-
-                            final String base = "SSTP " + sstpAttempt + "/"
-                                    + Math.min(SSTP_MAX_ATTEMPTS, sstpCandidates.size())
-                                    + " • " + safe(relay.countryShort) + " " + relay.ip
-                                    + " • tls:" + result.port;
-
-                            setState(State.CONNECTING, base);
-                            AppLog.i("session", base
-                                    + " preflightTlsMs=" + result.tlsMs
-                                    + " preflightTotalMs=" + result.totalMs);
-
-                            boolean ok;
-                            try {
-                                ok = sstp.connectBlocking(
-                                        relay,
-                                        result.port,
-                                        SSTP_ATTEMPT_TIMEOUT_MS,
-                                        (stage, message) -> {
-                                            if (!active(token)) return;
-
-                                            String extra = message == null || message.isEmpty()
-                                                    ? ""
-                                                    : " • " + message;
-
-                                            setState(State.CONNECTING,
-                                                    base + "\n" + stage + extra);
-                                        });
-                            } catch (Throwable e) {
-                                ok = false;
-                                lastFailure = e.getClass().getSimpleName()
-                                        + ": " + safe(e.getMessage());
-
-                                AppLog.e("session",
-                                        "SSTP attempt exception relay=" + relay.ip
-                                                + " port=" + result.port,
-                                        e);
-                            }
-
-                            if (ok) {
-                                connectedRelay = relay;
-                                connectedTransport = "SSTP";
-                                connectedPort = result.port;
-                                break;
-                            }
-
-                            if (!sstp.lastFailure().isEmpty()) {
-                                lastFailure = sstp.lastFailure();
-                            }
-
-                            AppLog.w("session", "SSTP attempt failed relay="
-                                    + relay.ip + " port=" + result.port
-                                    + " reason=" + lastFailure);
-                        }
-                    }
+                            "starting aggressive OpenVPN VPN Gate engine");
 
                     if (connectedRelay == null && openVpn.engineHealthy()) {
                         setState(State.SEARCHING,
@@ -444,7 +358,7 @@ public final class VpnSessionManager {
 
                 if (connectedRelay == null) {
                     throw new IllegalStateException(
-                            "Не удалось подключиться через SSTP/OpenVPN"
+                            "Не удалось подключиться через OpenVPN"
                                     + (lastFailure.isEmpty()
                                     ? ""
                                     : "; последняя причина: " + lastFailure));
@@ -564,17 +478,10 @@ public final class VpnSessionManager {
         }
 
         List<RelayProbe.Result> out = new ArrayList<>(ranked.size());
-        int ti = 0;
-        int ui = 0;
-
-        while (ti < tcp.size() || ui < udp.size()) {
-            if (ti < tcp.size()) {
-                out.add(tcp.get(ti++));
-            }
-            if (ui < udp.size()) {
-                out.add(udp.get(ui++));
-            }
-        }
+        // TCP entries passed an actual connect() probe. UDP entries are only
+        // unverified fallbacks, so exhaust verified TCP first.
+        out.addAll(tcp);
+        out.addAll(udp);
 
         return out;
     }
