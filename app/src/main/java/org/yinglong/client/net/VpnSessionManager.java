@@ -17,7 +17,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Yinglong v0.3.10: local catalogue -> SoftEther TCP probe -> VPNGATE auth fallback -> DHCP -> VpnService.
+ * Yinglong v0.3.11: local VPN Gate TCP profile port -> SoftEther probe -> VPNGATE auth fallback -> DHCP -> VpnService.
  * No catalogue refresh happens on START.
  */
 public final class VpnSessionManager {
@@ -138,7 +138,7 @@ public final class VpnSessionManager {
 
                     String phaseName = phase == 0 ? "быстрая" : "полная";
                     setState(State.SEARCHING,
-                            "SoftEther TLS: " + phaseName + " проверка 443/992/5555 • 0/" + hostLimit);
+                            "SoftEther TLS: " + phaseName + " проверка TCP-портов из локальной базы…");
 
                     final int phaseIndex = phase;
                     List<SoftEtherProbe.Result> ranked = SoftEtherProbe.rank(
