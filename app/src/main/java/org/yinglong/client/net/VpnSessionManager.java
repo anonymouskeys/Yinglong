@@ -18,7 +18,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Yinglong v0.3.13 hybrid session:
+ * Yinglong v0.3.14 hybrid session:
  * native SoftEther first, official VPN Gate OpenVPN profile as fallback.
  */
 public final class VpnSessionManager {
@@ -42,11 +42,11 @@ public final class VpnSessionManager {
     private volatile String detail = "";
 
     private static final int BOOTSTRAP_ROUNDS = 3;
-    private static final int SOFTETHER_MAX_RELAY_ATTEMPTS = 2;
-    private static final long SOFTETHER_ATTEMPT_TIMEOUT_MS = 18_000L;
+    private static final int SOFTETHER_MAX_RELAY_ATTEMPTS = 1;
+    private static final long SOFTETHER_ATTEMPT_TIMEOUT_MS = 55_000L;
     private static final int OPENVPN_MAX_ATTEMPTS = 20;
-    private static final long OPENVPN_TCP_TIMEOUT_MS = 45_000L;
-    private static final long OPENVPN_UDP_TIMEOUT_MS = 30_000L;
+    private static final long OPENVPN_TCP_TIMEOUT_MS = 60_000L;
+    private static final long OPENVPN_UDP_TIMEOUT_MS = 45_000L;
 
     public static VpnSessionManager get(Context context) {
         VpnSessionManager local = instance;
@@ -254,6 +254,10 @@ public final class VpnSessionManager {
                             "SoftEther не подключился. Перехожу на OpenVPN relay…");
                     AppLog.w("session",
                             "SoftEther exhausted/bypassed; starting OpenVPN profile fallback");
+
+                    // Clean up once before the whole OpenVPN round. Relay changes
+                    // then happen by profile replacement inside one live service.
+                    openVpn.prepareForFailoverRound();
 
                     List<RelayProbe.Result> ovpnCandidates = RelayProbe.rank(
                             relays,

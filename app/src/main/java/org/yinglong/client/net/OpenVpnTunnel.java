@@ -122,6 +122,16 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
         return connectBlocking(relay, timeoutMs, null);
     }
 
+    /**
+     * Clean up once before an OpenVPN failover round. Do NOT stop/start the
+     * foreground VPN service between relay attempts: on Android 14+ rapid
+     * restarts can trigger ForegroundServiceDidNotStartInTimeException.
+     * Later startOpenVpn(..., true) calls replace the profile in-place.
+     */
+    public void prepareForFailoverRound() {
+        stopEngine(1500L);
+    }
+
     public boolean connectBlocking(Relay relay, long timeoutMs, ProgressListener progress) throws Exception {
         if (relay == null) throw new IllegalArgumentException("relay == null");
         if (!engineHealthy) throw new IllegalStateException("OpenVPN engine self-check failed; see log");
@@ -199,7 +209,9 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
                 long idle = now - attempt.lastProgressAt;
                 // Before the server replies we fail quickly. Once TLS/AUTH has started, VPN Gate
                 // can legitimately need well over ten seconds to finish the handshake and PUSH.
-                long stallLimit = attempt.serverReplied ? 22_000L : 12_000L;
+                // A replying VPN Gate server may need longer than 22s to finish
+                // TLS and PUSH. Do not kill a verified server certificate prematurely.
+                long stallLimit = attempt.serverReplied ? 45_000L : 12_000L;
                 if (idle >= stallLimit) {
                     attempt.failure = "stalled " + idle + " ms at " + attempt.lastStage;
                     break;
@@ -219,7 +231,10 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
             AppLog.w("tunnel", attempt.failure + " relay=" + relay.ip
                     + " sawProgress=" + attempt.sawProgress + " serverReplied=" + attempt.serverReplied);
             attempt.stage("TIMEOUT", attempt.failure);
-            stopEngine(650L);
+            // Leave OpenVPNService alive. The next profile is installed with
+            // replace_running_vpn=true, avoiding an Android foreground-service
+            // stop/start race during rapid relay failover.
+            if (currentAttempt == attempt) currentAttempt = null;
             return false;
         }
 
@@ -227,7 +242,7 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
             lastFailure = attempt.failure;
             AppLog.w("tunnel", "connect failed relay=" + relay.ip + " reason=" + attempt.failure);
             attempt.stage("FAILED", attempt.failure);
-            stopEngine(650L);
+            if (currentAttempt == attempt) currentAttempt = null;
             return false;
         }
 
@@ -237,7 +252,9 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
             lastFailure = attempt.failure;
             AppLog.w("tunnel", attempt.failure + " relay=" + relay.ip);
             attempt.stage("VERIFY_FAILED", attempt.failure);
-            stopEngine(650L);
+            if (currentAttempt == attempt) currentAttempt = null;
+            connected = false;
+            activeRelay = null;
             return false;
         }
 

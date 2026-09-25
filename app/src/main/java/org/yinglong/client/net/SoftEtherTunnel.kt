@@ -85,9 +85,12 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
         val variants = arrayOf(
             AuthVariant("PASSWORD", "vpn", AuthMethod.AUTO)
         )
+        // ConnectionController inside the SoftEther module already retries three times.
+        // The old wrapper killed the service at 18s, before the native timeout/retry
+        // path could finish. Give the module enough wall-clock time for a real result.
         val perVariantTimeout = timeoutMs
-            .coerceAtLeast(12_000L)
-            .coerceAtMost(18_000L)
+            .coerceAtLeast(45_000L)
+            .coerceAtMost(60_000L)
 
         var lastReason = ""
         for ((index, variant) in variants.withIndex()) {
@@ -164,11 +167,13 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
             useUdp = false,
             udpPort = 0,
             udpOnly = false,
-            connectTimeoutMs = timeoutMs.coerceIn(12_000L, 18_000L).toInt(),
+            // Per-native-attempt timeout. Three attempts plus retry delays fit
+            // inside the outer 55s attempt budget.
+            connectTimeoutMs = 12_000,
             country = relay.countryShort ?: "",
             clientProductName = "Yinglong",
-            clientVersion = "0.3.13",
-            clientBuild = 17
+            clientVersion = "0.3.14",
+            clientBuild = 18
         )
 
         val intent = Intent(appContext, SoftEtherVpnService::class.java).apply {
