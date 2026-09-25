@@ -281,17 +281,32 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
             if (currentAttempt == attempt) {
                 currentAttempt = null;
             }
+            hardStopEngine("start failure " + selectedEngineName()
+                    + " relay=" + relay.ip, 1_600L);
             return false;
         }
 
         long startedAt = SystemClock.elapsedRealtime();
-        long noReplyMs = tcpTransport ? 12_000L : 10_000L;
-        long repliedMs = Math.max(timeoutMs, tcpTransport ? 42_000L : 28_000L);
+        boolean core3 = "OpenVPN3".equals(selectedEngineName());
+
+        long noReplyMs = tcpTransport
+                ? (core3 ? 14_000L : 10_000L)
+                : (core3 ? 12_000L : 9_000L);
+
+        long repliedMs = Math.max(
+                timeoutMs,
+                tcpTransport ? (core3 ? 36_000L : 30_000L)
+                        : (core3 ? 28_000L : 22_000L)
+        );
+
         long noReplyDeadline = startedAt + noReplyMs;
         long repliedDeadline = startedAt + repliedMs;
-        long postReplyStallMs = tcpTransport ? 30_000L : 20_000L;
 
-        AppLog.i("engine-v8", "watchdog engine=" + selectedEngineName()
+        long postReplyStallMs = tcpTransport
+                ? (core3 ? 24_000L : 18_000L)
+                : (core3 ? 20_000L : 16_000L);
+
+        AppLog.i("engine-v81", "A/B watchdog engine=" + selectedEngineName()
                 + " relay=" + relay.ip
                 + " noReplyMs=" + noReplyMs
                 + " repliedMs=" + repliedMs
