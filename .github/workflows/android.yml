@@ -69,6 +69,13 @@ jobs:
           p.write_text(s)
           PY
 
+      - name: Generate OpenSSL headers for SoftEther
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash third_party/SoftEtherClient/src/main/cpp/build-openssl-android.sh --headers-only
+          test -f third_party/SoftEtherClient/src/main/cpp/openssl/include/openssl/configuration.h
+
       - name: Build debug APK
         run: gradle --no-daemon :app:assembleDebug
 
