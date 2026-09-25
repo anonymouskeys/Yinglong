@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Yinglong v0.3.15 hybrid session:
+ * Yinglong v0.5.0 hybrid session:
  * native SoftEther first, official VPN Gate OpenVPN profile as fallback.
  */
 public final class VpnSessionManager {
@@ -31,6 +31,7 @@ public final class VpnSessionManager {
 
     private final Context context;
     private final SoftEtherTunnel softEther;
+    private final SstpTunnel sstp;
     private final OpenVpnTunnel openVpn;
     private final SharedPreferences sessionDiag;
     private final ExecutorService sessionWorker = Executors.newSingleThreadExecutor();
@@ -45,6 +46,8 @@ public final class VpnSessionManager {
     private static final int BOOTSTRAP_ROUNDS = 3;
     private static final int SOFTETHER_MAX_RELAY_ATTEMPTS = 0;
     private static final long SOFTETHER_ATTEMPT_TIMEOUT_MS = 55_000L;
+    private static final int SSTP_MAX_ATTEMPTS = 10;
+    private static final long SSTP_ATTEMPT_TIMEOUT_MS = 18_000L;
     private static final int OPENVPN_MAX_ATTEMPTS = 24;
     private static final long OPENVPN_TCP_TIMEOUT_MS = 75_000L;
     private static final long OPENVPN_UDP_TIMEOUT_MS = 60_000L;
@@ -74,10 +77,12 @@ public final class VpnSessionManager {
         sessionDiag.edit().putBoolean("active", false).apply();
 
         this.softEther = SoftEtherTunnel.get(context);
+        this.sstp = SstpTunnel.get(context);
         this.openVpn = OpenVpnTunnel.get(context);
 
         AppLog.i("session", "VpnSessionManager initialized SoftEther="
-                + softEther.engineHealthy() + " OpenVPN=" + openVpn.engineHealthy());
+                + softEther.engineHealthy() + " SSTP=" + sstp.engineHealthy()
+                + " OpenVPN=" + openVpn.engineHealthy());
     }
 
     public State state() { return state; }
@@ -100,9 +105,10 @@ public final class VpnSessionManager {
         AppLog.i("session", "start() called running=" + running.get()
                 + " permission=" + permission
                 + " softEther=" + softEther.engineHealthy()
+                + " sstp=" + sstp.engineHealthy()
                 + " openVpn=" + openVpn.engineHealthy());
 
-        if (!softEther.engineHealthy() && !openVpn.engineHealthy()) {
+        if (!softEther.engineHealthy() && !sstp.engineHealthy() && !openVpn.engineHealthy()) {
             setState(State.ERROR, "VPN engines self-check failed");
             return;
         }
@@ -133,6 +139,9 @@ public final class VpnSessionManager {
 
         try { softEther.disconnect(); }
         catch (Throwable e) { AppLog.e("session", "SoftEther stop failed", e); }
+
+        try { sstp.disconnect(); }
+        catch (Throwable e) { AppLog.e("session", "SSTP stop failed", e); }
 
         try { openVpn.disconnect(); }
         catch (Throwable e) { AppLog.e("session", "OpenVPN stop failed", e); }
@@ -247,14 +256,17 @@ public final class VpnSessionManager {
                     }
                 }
 
-                // 2) Fallback to the relay's official embedded OpenVPN profile.
-                if (connectedRelay == null && active(token) && openVpn.engineHealthy()) {
+                // 2) Probe real TCP endpoints once, then try MS-SSTP first.
+                // SSTP rides a normal TLS/HTTP exchange and bypasses the OpenVPN
+                // control handshake that this mobile path is currently stalling.
+                if (connectedRelay == null && active(token)
+                        && (sstp.engineHealthy() || openVpn.engineHealthy())) {
                     try { softEther.disconnect(); } catch (Throwable ignored) {}
 
                     setState(State.SEARCHING,
-                            "SoftEther не подключился. Перехожу на OpenVPN relay…");
+                            "Проверяю TCP relay для SSTP/OpenVPN…");
                     AppLog.w("session",
-                            "SoftEther exhausted/bypassed; starting OpenVPN profile fallback");
+                            "starting SSTP-first multi-transport fallback");
 
                     List<RelayProbe.Result> ovpnCandidates = RelayProbe.rank(
                             relays,
@@ -271,76 +283,139 @@ public final class VpnSessionManager {
                             });
 
                     ovpnCandidates = orderOpenVpnCandidates(ovpnCandidates);
-                    AppLog.i("session", "OpenVPN interleaved candidates=" + ovpnCandidates.size());
+                    AppLog.i("session", "transport candidates=" + ovpnCandidates.size());
 
-                    Set<String> tried = new HashSet<>();
-                    int ovpnAttempt = 0;
+                    if (sstp.engineHealthy()) {
+                        Set<String> sstpTried = new HashSet<>();
+                        int sstpAttempt = 0;
 
-                    for (RelayProbe.Result result : ovpnCandidates) {
-                        if (!active(token)) return;
-                        if (result == null || result.relay == null) continue;
+                        for (RelayProbe.Result result : ovpnCandidates) {
+                            if (!active(token)) return;
+                            if (result == null || result.relay == null || !result.tcp) continue;
+                            if (result.port <= 0 || result.port > 65535) continue;
 
-                        Relay relay = result.relay;
-                        String key = relay.ip + ":" + result.port
-                                + ":" + (result.tcp ? "tcp" : "udp");
+                            Relay relay = result.relay;
+                            String key = relay.ip + ":" + result.port;
+                            if (!sstpTried.add(key)) continue;
+                            if (sstpAttempt >= SSTP_MAX_ATTEMPTS) break;
+                            sstpAttempt++;
 
-                        if (!tried.add(key)) continue;
-                        if (ovpnAttempt >= OPENVPN_MAX_ATTEMPTS) break;
-                        ovpnAttempt++;
+                            final String base = "SSTP " + sstpAttempt + "/"
+                                    + SSTP_MAX_ATTEMPTS
+                                    + " • " + safe(relay.countryShort) + " " + relay.ip
+                                    + " • tls:" + result.port;
 
-                        final String endpoint = (result.tcp ? "tcp:" : "udp:")
-                                + result.port;
-                        final String base = "OpenVPN " + ovpnAttempt + "/"
-                                + Math.min(OPENVPN_MAX_ATTEMPTS, ovpnCandidates.size())
-                                + " • " + safe(relay.countryShort) + " " + relay.ip
-                                + " • " + endpoint;
+                            setState(State.CONNECTING, base);
+                            AppLog.i("session", base);
 
-                        setState(State.CONNECTING, base);
-                        AppLog.i("session", base);
+                            boolean ok;
+                            try {
+                                ok = sstp.connectBlocking(
+                                        relay,
+                                        result.port,
+                                        SSTP_ATTEMPT_TIMEOUT_MS,
+                                        (stage, message) -> {
+                                            if (!active(token)) return;
+                                            String extra = message == null || message.isEmpty()
+                                                    ? "" : " • " + message;
+                                            setState(State.CONNECTING, base + "\n" + stage + extra);
+                                        });
+                            } catch (Throwable e) {
+                                ok = false;
+                                lastFailure = e.getClass().getSimpleName()
+                                        + ": " + safe(e.getMessage());
+                                AppLog.e("session",
+                                        "SSTP attempt exception relay=" + relay.ip
+                                                + " port=" + result.port,
+                                        e);
+                            }
 
-                        boolean ok;
-                        try {
-                            long timeout = result.tcp
-                                    ? OPENVPN_TCP_TIMEOUT_MS
-                                    : OPENVPN_UDP_TIMEOUT_MS;
+                            if (ok) {
+                                connectedRelay = relay;
+                                connectedTransport = "SSTP";
+                                connectedPort = result.port;
+                                break;
+                            }
 
-                            ok = openVpn.connectBlocking(
-                                    relay,
-                                    timeout,
-                                    (stage, message) -> {
-                                        if (!active(token)) return;
-                                        String extra = message == null || message.isEmpty()
-                                                ? "" : " • " + message;
-                                        setState(State.CONNECTING, base + "\n" + stage + extra);
-                                    });
-                        } catch (Throwable e) {
-                            ok = false;
-                            lastFailure = e.getClass().getSimpleName()
-                                    + ": " + safe(e.getMessage());
-                            AppLog.e("session",
-                                    "OpenVPN attempt exception relay=" + relay.ip,
-                                    e);
+                            if (!sstp.lastFailure().isEmpty()) {
+                                lastFailure = sstp.lastFailure();
+                            }
+                            AppLog.w("session", "SSTP attempt failed relay="
+                                    + relay.ip + " port=" + result.port
+                                    + " reason=" + lastFailure);
                         }
+                    }
 
-                        if (ok) {
-                            connectedRelay = relay;
-                            connectedTransport = "OpenVPN";
-                            connectedPort = result.port;
-                            break;
+                    if (connectedRelay == null && openVpn.engineHealthy()) {
+                        Set<String> tried = new HashSet<>();
+                        int ovpnAttempt = 0;
+
+                        for (RelayProbe.Result result : ovpnCandidates) {
+                            if (!active(token)) return;
+                            if (result == null || result.relay == null) continue;
+
+                            Relay relay = result.relay;
+                            String key = relay.ip + ":" + result.port
+                                    + ":" + (result.tcp ? "tcp" : "udp");
+
+                            if (!tried.add(key)) continue;
+                            if (ovpnAttempt >= OPENVPN_MAX_ATTEMPTS) break;
+                            ovpnAttempt++;
+
+                            final String endpoint = (result.tcp ? "tcp:" : "udp:")
+                                    + result.port;
+                            final String base = "OpenVPN " + ovpnAttempt + "/"
+                                    + Math.min(OPENVPN_MAX_ATTEMPTS, ovpnCandidates.size())
+                                    + " • " + safe(relay.countryShort) + " " + relay.ip
+                                    + " • " + endpoint;
+
+                            setState(State.CONNECTING, base);
+                            AppLog.i("session", base);
+
+                            boolean ok;
+                            try {
+                                long timeout = result.tcp
+                                        ? OPENVPN_TCP_TIMEOUT_MS
+                                        : OPENVPN_UDP_TIMEOUT_MS;
+
+                                ok = openVpn.connectBlocking(
+                                        relay,
+                                        timeout,
+                                        (stage, message) -> {
+                                            if (!active(token)) return;
+                                            String extra = message == null || message.isEmpty()
+                                                    ? "" : " • " + message;
+                                            setState(State.CONNECTING, base + "\n" + stage + extra);
+                                        });
+                            } catch (Throwable e) {
+                                ok = false;
+                                lastFailure = e.getClass().getSimpleName()
+                                        + ": " + safe(e.getMessage());
+                                AppLog.e("session",
+                                        "OpenVPN attempt exception relay=" + relay.ip,
+                                        e);
+                            }
+
+                            if (ok) {
+                                connectedRelay = relay;
+                                connectedTransport = "OpenVPN";
+                                connectedPort = result.port;
+                                break;
+                            }
+
+                            if (!openVpn.lastFailure().isEmpty()) {
+                                lastFailure = openVpn.lastFailure();
+                            }
+
+                            AppLog.w("session", "OpenVPN attempt failed relay="
+                                    + relay.ip + " reason=" + lastFailure);
                         }
-
-                        if (!openVpn.lastFailure().isEmpty()) {
-                            lastFailure = openVpn.lastFailure();
-                        }
-
-                        AppLog.w("session", "OpenVPN attempt failed relay="
-                                + relay.ip + " reason=" + lastFailure);
                     }
                 }
 
                 if (connectedRelay == null) {
                     throw new IllegalStateException(
-                            "Не удалось подключиться ни через SoftEther, ни через OpenVPN"
+                            "Не удалось подключиться через SSTP/OpenVPN"
                                     + (lastFailure.isEmpty()
                                     ? ""
                                     : "; последняя причина: " + lastFailure));
@@ -375,7 +450,9 @@ public final class VpnSessionManager {
                     });
                 }
 
-                if ("OpenVPN".equals(sessionTransport)) {
+                if ("SSTP".equals(sessionTransport)) {
+                    sstp.awaitConnectionLoss();
+                } else if ("OpenVPN".equals(sessionTransport)) {
                     openVpn.awaitConnectionLoss();
                 } else {
                     softEther.awaitConnectionLoss();
@@ -399,6 +476,7 @@ public final class VpnSessionManager {
                 setState(State.ERROR, message);
 
                 try { softEther.disconnect(); } catch (Throwable ignored) {}
+                try { sstp.disconnect(); } catch (Throwable ignored) {}
                 try { openVpn.disconnect(); } catch (Throwable ignored) {}
             }
         } finally {

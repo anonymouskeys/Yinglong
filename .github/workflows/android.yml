@@ -69,6 +69,82 @@ jobs:
           p.write_text(s)
           PY
 
+      - name: Fetch pinned MS-SSTP Android engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          PIN="f14e33a28e04ab17885acb2f60f972791dd6438b"
+          rm -rf third_party/sstpClient
+          mkdir -p third_party/sstpClient
+          git -C third_party/sstpClient init
+          git -C third_party/sstpClient remote add origin https://github.com/hoang-rio/Open-SSTP-Client.git
+          git -C third_party/sstpClient fetch --depth 1 origin "$PIN"
+          git -C third_party/sstpClient checkout --detach FETCH_HEAD
+          test "$(git -C third_party/sstpClient rev-parse HEAD)" = "$PIN"
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("third_party/sstpClient/build.gradle")
+          s = p.read_text()
+          s = s.replace(
+              "plugins {\n    id 'com.android.library'\n}",
+              "plugins {\n    id 'com.android.library'\n    id 'org.jetbrains.kotlin.android'\n}"
+          )
+          p.write_text(s)
+
+          p = Path("third_party/sstpClient/src/main/java/kittoku/osc/service/SstpVpnService.kt")
+          s = p.read_text()
+          s = s.replace(
+              "override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {\n        return when",
+              "override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {\n        beForegrounded()\n        return when"
+          )
+          s = s.replace(
+              "                mWasConnected = false\n\n                beForegrounded()",
+              "                mWasConnected = false\n                setStringPrefValue(\"CONNECTING\", OscPrefKey.HOME_STATUS, prefs)"
+          )
+          s = s.replace(
+              "                if (connectedIp != \"\") {\n                    mWasConnected = true",
+              "                if (connectedIp != \"\") {\n                    setStringPrefValue(\"CONNECTED\", OscPrefKey.HOME_STATUS, prefs)\n                    mWasConnected = true"
+          )
+          s = s.replace(
+              "    internal fun notifyError(message: String) {\n        if (mWasConnected) {",
+              "    internal fun notifyError(message: String) {\n        setStringPrefValue(message, OscPrefKey.HOME_STATUS, prefs)\n        if (mWasConnected) {"
+          )
+          p.write_text(s)
+
+          p = Path("third_party/sstpClient/src/main/java/kittoku/osc/terminal/SSLTerminal.kt")
+          s = p.read_text()
+          old = """        if (getBooleanPrefValue(OscPrefKey.SSL_DO_VERIFY, bridge.prefs)) {
+            HttpsURLConnection.getDefaultHostnameVerifier().also {
+                if (!it.verify(sslHostname, engine.session)) {
+                    bridge.controlMailbox.send(ControlMessage(Where.SSL, Result.ERR_VERIFICATION_FAILED))
+                    return false
+                }
+            }
+        }
+"""
+          new = """        if (getBooleanPrefValue(OscPrefKey.SSL_DO_VERIFY, bridge.prefs)) {
+            val verifyHostname =
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N &&
+                    getBooleanPrefValue(OscPrefKey.SSL_DO_USE_CUSTOM_SNI, bridge.prefs)) {
+                    getStringPrefValue(OscPrefKey.SSL_CUSTOM_SNI, bridge.prefs)
+                } else {
+                    sslHostname
+                }
+            HttpsURLConnection.getDefaultHostnameVerifier().also {
+                if (!it.verify(verifyHostname, engine.session)) {
+                    bridge.controlMailbox.send(ControlMessage(Where.SSL, Result.ERR_VERIFICATION_FAILED))
+                    return false
+                }
+            }
+        }
+"""
+          if old not in s:
+              raise SystemExit("SSTP SSL verification anchor not found")
+          p.write_text(s.replace(old, new, 1))
+          PY
+
       - name: Generate OpenSSL headers for SoftEther
         shell: bash
         run: |
@@ -102,6 +178,7 @@ jobs:
           fi
           echo "Checking merged manifest: $MANIFEST"
           grep -q 'vn.unlimit.softether.SoftEtherVpnService' "$MANIFEST"
+          grep -q 'kittoku.osc.service.SstpVpnService' "$MANIFEST"
           grep -q 'android.permission.BIND_VPN_SERVICE' "$MANIFEST"
           grep -q 'android.permission.FOREGROUND_SERVICE_SPECIAL_USE' "$MANIFEST"
           echo "SoftEther VPN engine packaging checks passed"

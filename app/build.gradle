@@ -11,8 +11,8 @@ android {
         applicationId 'org.yinglong.client'
         minSdk 24
         targetSdk 35
-        versionCode 20
-        versionName '0.4.0'
+        versionCode 21
+        versionName '0.5.0'
     }
 
     buildTypes {
@@ -40,6 +40,7 @@ android {
 
 dependencies {
     implementation project(':SoftEtherClient')
+    implementation project(':sstpClient')
     implementation files("${rootDir}/third_party/icsopenvpn-0.7.55-myst.aar")
     implementation 'androidx.annotation:annotation:1.9.1'
     implementation 'androidx.core:core-ktx:1.13.1'
