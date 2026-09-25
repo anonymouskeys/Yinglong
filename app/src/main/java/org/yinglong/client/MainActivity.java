@@ -50,7 +50,7 @@ public final class MainActivity extends Activity {
     @Override protected void onCreate(Bundle stateBundle) {
         super.onCreate(stateBundle);
         AppLog.init(this);
-        AppLog.i("ui", "MainActivity created; v0.3.6 VPN Gate handshake build");
+        AppLog.i("ui", "MainActivity created; v0.3.7 UDP-first fresh-seed build");
         manager = VpnSessionManager.get(this);
         setContentView(buildUi());
     }

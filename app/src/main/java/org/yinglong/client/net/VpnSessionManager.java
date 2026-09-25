@@ -8,6 +8,7 @@ import org.yinglong.client.catalog.RelayStore;
 import org.yinglong.client.catalog.RelayUpdater;
 import org.yinglong.client.diag.AppLog;
 
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -42,8 +43,8 @@ public final class VpnSessionManager {
     private static final int FULL_ATTEMPTS = 20;
     // OpenVPN's control-channel handshake can legitimately outlive the raw TCP connect.
     // Give old VPN Gate peers enough time to either finish or emit their own useful TLS/cipher error.
-    private static final long TCP_CONNECT_TIMEOUT_MS = 75_000L;
-    private static final long UDP_CONNECT_TIMEOUT_MS = 45_000L;
+    private static final long TCP_CONNECT_TIMEOUT_MS = 70_000L;
+    private static final long UDP_CONNECT_TIMEOUT_MS = 32_000L;
 
     public static VpnSessionManager get(Context context) {
         VpnSessionManager local = instance;
@@ -144,7 +145,11 @@ public final class VpnSessionManager {
                 if (relays.isEmpty()) throw new IllegalStateException("локальный пул relay пуст");
 
                 Set<String> tried = new HashSet<>();
-                boolean preferUdp = false;
+                // The current network can establish TCP and verify the server certificate, then
+                // drops the rest of the OpenVPN control-channel exchange. Probe UDP first so we
+                // do not burn minutes on endpoints that DPI lets half-open.
+                boolean preferUdp = true;
+                boolean tcpTlsFiltered = false;
                 boolean connectedThisRound = false;
                 Relay connectedRelay = null;
 
@@ -178,13 +183,19 @@ public final class VpnSessionManager {
                         continue;
                     }
                     AppLog.i("session", phaseName + " ranked candidates=" + ranked.size());
+                    ranked = orderCandidates(ranked, preferUdp);
+                    AppLog.i("session", "transport order=" + (preferUdp ? "UDP-first interleaved" : "TCP-first"));
 
                     int attempted = 0;
                     for (RelayProbe.Result result : ranked) {
                         if (!active(token)) return;
                         if (result == null || result.relay == null) continue;
                         Relay relay = result.relay;
-                        if (!tried.add(relay.ip)) continue;
+                        if (tcpTlsFiltered && result.tcp) {
+                            AppLog.i("session", "skip TCP after post-certificate TLS filtering relay=" + relay.ip);
+                            continue;
+                        }
+                        if (!tried.add(OpenVpnProfileUtil.endpointKey(relay))) continue;
                         if (attempted >= attemptLimits[phase]) break;
                         attempted++;
 
@@ -211,6 +222,13 @@ public final class VpnSessionManager {
 
                         if (!ok) {
                             if (!tunnel.lastFailure().isEmpty()) lastFailure = tunnel.lastFailure();
+                            if (result.tcp && looksLikePostCertificateTlsBlock(lastFailure)) {
+                                tcpTlsFiltered = true;
+                                preferUdp = true;
+                                AppLog.w("session", "TCP control channel looks filtered after TLS certificate; "
+                                        + "remaining TCP candidates will be skipped this round");
+                                setState(State.SEARCHING, "TCP после сертификата блокируется — переключаюсь на UDP");
+                            }
                             AppLog.w("session", "attempt failed relay=" + relay.ip + " reason=" + lastFailure);
                             continue;
                         }
@@ -265,6 +283,33 @@ public final class VpnSessionManager {
             if (generation.get() == token && !running.get() && state != State.ERROR) setState(State.IDLE, "");
             AppLog.i("session", "runSession exit token=" + token + " state=" + state + " running=" + running.get());
         }
+    }
+
+    private static List<RelayProbe.Result> orderCandidates(List<RelayProbe.Result> ranked, boolean preferUdp) {
+        if (!preferUdp || ranked == null || ranked.size() < 2) return ranked;
+
+        List<RelayProbe.Result> udp = new ArrayList<>();
+        List<RelayProbe.Result> tcp = new ArrayList<>();
+        for (RelayProbe.Result r : ranked) {
+            if (r == null) continue;
+            if (r.tcp) tcp.add(r); else udp.add(r);
+        }
+
+        // Three quick UDP attempts, then one known-live TCP candidate.
+        List<RelayProbe.Result> out = new ArrayList<>(ranked.size());
+        int u = 0, t = 0;
+        while (u < udp.size() || t < tcp.size()) {
+            for (int burst = 0; burst < 3 && u < udp.size(); burst++) out.add(udp.get(u++));
+            if (t < tcp.size()) out.add(tcp.get(t++));
+        }
+        return out;
+    }
+
+    private static boolean looksLikePostCertificateTlsBlock(String failure) {
+        String f = safe(failure).toLowerCase(java.util.Locale.US);
+        return f.contains("tls key negotiation failed")
+                || f.contains("tls handshake failed")
+                || f.contains("fatal tls error");
     }
 
     private boolean active(long token) { return running.get() && generation.get() == token; }

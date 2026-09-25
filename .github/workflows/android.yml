@@ -39,6 +39,15 @@ jobs:
           echo "1da7a6068d0bda22fef4b8ec7a887c07ab456e65c1246ea9a7533c4676891454  third_party/icsopenvpn-0.7.55-myst.aar" \
             | sha256sum -c -
 
+      - name: Refresh bundled VPN Gate relay seed
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/update_seed.sh
+          COUNT="$(grep -Ev '^(\*vpn_servers|\*|#|[[:space:]]*$)' app/src/main/assets/relays_seed.csv | wc -l | tr -d ' ')"
+          echo "Bundled relay profiles: $COUNT"
+          test "$COUNT" -ge 10
+
       - name: Build debug APK
         run: gradle --no-daemon :app:assembleDebug
 

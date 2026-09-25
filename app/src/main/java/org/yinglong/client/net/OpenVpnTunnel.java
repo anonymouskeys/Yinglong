@@ -139,6 +139,7 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
         if (config == null || config.trim().isEmpty()) throw new IOException("empty OpenVPN profile");
 
         OpenVpnProfileUtil.Endpoint endpoint = OpenVpnProfileUtil.endpoint(relay);
+        boolean tcpTransport = endpoint == null || endpoint.tcp;
         String endpointText = endpoint == null ? "?" : ((endpoint.tcp ? "tcp" : "udp") + ":" + endpoint.port);
         AppLog.i("tunnel", "profile relay=" + relay.ip + " endpoint=" + endpointText + " chars=" + config.length());
         if (progress != null) progress.onStage("PROFILE", endpointText);
@@ -198,16 +199,20 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
         boolean signaled = false;
         long overallMs = Math.max(15_000L, timeoutMs);
         long overallDeadline = SystemClock.elapsedRealtime() + overallMs;
-        AppLog.i("tunnel", "watchdog relay=" + relay.ip + " overallMs=" + overallMs
-                + " preReplyStallMs=12000 postReplyStallMs=65000");
+        // UDP is our first escape path on networks that let TCP connect but then filter the
+        // OpenVPN control channel. A dead UDP relay should be abandoned quickly; a replying
+        // relay still gets enough time to finish TLS and receive PUSH_REPLY.
+        long preReplyStallMs = tcpTransport ? 12_000L : 5_500L;
+        long postReplyStallMs = tcpTransport ? 65_000L : 28_000L;
+        AppLog.i("tunnel", "watchdog relay=" + relay.ip + " transport="
+                + (tcpTransport ? "tcp" : "udp") + " overallMs=" + overallMs
+                + " preReplyStallMs=" + preReplyStallMs
+                + " postReplyStallMs=" + postReplyStallMs);
         try {
             while (!(signaled = attempt.done.await(250L, TimeUnit.MILLISECONDS))) {
                 long now = SystemClock.elapsedRealtime();
                 long idle = now - attempt.lastProgressAt;
-                // Before the server replies we fail quickly. Once TLS/AUTH has started, let the
-                // OpenVPN control-channel handshake breathe. The previous 22s watchdog killed every
-                // tested relay at TLS_CERT_OK before OpenVPN's own handshake window could expire.
-                long stallLimit = attempt.serverReplied ? 65_000L : 12_000L;
+                long stallLimit = attempt.serverReplied ? postReplyStallMs : preReplyStallMs;
                 if (idle >= stallLimit) {
                     attempt.failure = "stalled " + idle + " ms at " + attempt.lastStage;
                     break;
@@ -443,6 +448,11 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
                     || low.contains("failed to negotiate cipher") || low.contains("options error")
                     || low.contains("tls key negotiation failed") || low.contains("inactivity timeout")) {
                 attempt.meaningfulProgress("ENGINE_ERROR", line);
+                // Yinglong owns failover. Do not let OpenVPN spend another minute retrying
+                // the same endpoint after a fatal TLS/control-channel error.
+                attempt.failure = line;
+                attempt.success = false;
+                attempt.done.countDown();
             }
         } catch (Throwable e) {
             AppLog.e("openvpn", "failed to render engine log item", e);
@@ -464,20 +474,22 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
             dataCiphers = profile.mDataCiphers;
         }
 
-        // BF-CBC is not used by the relays in the current log, but older cached VPN Gate
-        // profiles can still contain it. Only enable OpenSSL's legacy provider when needed.
-        String upperCipher = cipher.toUpperCase(java.util.Locale.US);
-        String upperData = dataCiphers.toUpperCase(java.util.Locale.US);
-        if ("BF-CBC".equals(upperCipher) || upperData.contains("BF-CBC")) {
-            profile.mUseLegacyProvider = true;
-        }
+        // VPN Gate profiles intentionally carry old compatibility material and many
+        // relays still use SHA1/AES-CBC era settings. OpenVPN 2.7 + OpenSSL 3 can load
+        // those reliably with the legacy provider, while keeping the certificate profile
+        // at OpenVPN's "legacy" level rather than the weaker "insecure" level.
+        profile.mUseLegacyProvider = true;
+        if (safe(profile.mTlSCertProfile).trim().isEmpty()) profile.mTlSCertProfile = "legacy";
 
         // Require a TLS server certificate rather than accepting a generic certificate role.
         profile.mExpectTLSCert = true;
         AppLog.i("tunnel", "profile compatibility compatMode=" + profile.mCompatMode
                 + " cipher=" + safe(profile.mCipher)
                 + " dataCiphers=" + safe(profile.mDataCiphers)
-                + " remoteCertTls=" + profile.mExpectTLSCert);
+                + " remoteCertTls=" + profile.mExpectTLSCert
+                + " authType=" + profile.mAuthenticationType
+                + " legacyProvider=" + profile.mUseLegacyProvider
+                + " tlsCertProfile=" + safe(profile.mTlSCertProfile));
     }
 
     private static boolean containsCipher(String list, String cipher) {
