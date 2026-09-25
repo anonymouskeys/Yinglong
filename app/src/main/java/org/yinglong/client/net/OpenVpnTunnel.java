@@ -51,7 +51,6 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
     private volatile boolean connected;
     private volatile Relay activeRelay;
     private volatile String lastFailure = "";
-    private volatile boolean lastAttemptServerReplied;
     private volatile boolean engineHealthy;
 
     private static final class Attempt {
@@ -117,7 +116,6 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
     public boolean isConnected() { return connected; }
     public Relay activeRelay() { return activeRelay; }
     public String lastFailure() { return lastFailure; }
-    public boolean lastAttemptServerReplied() { return lastAttemptServerReplied; }
     public boolean engineHealthy() { return engineHealthy; }
 
     public boolean connectBlocking(Relay relay, long timeoutMs) throws Exception {
@@ -125,29 +123,18 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
     }
 
     public boolean connectBlocking(Relay relay, long timeoutMs, ProgressListener progress) throws Exception {
-        return connectBlocking(relay, timeoutMs, progress, false);
-    }
-
-    public boolean connectBlocking(Relay relay, long timeoutMs, ProgressListener progress,
-                                   boolean udpLowMtuRescue) throws Exception {
         if (relay == null) throw new IllegalArgumentException("relay == null");
         if (!engineHealthy) throw new IllegalStateException("OpenVPN engine self-check failed; see log");
         if (!isPermissionGranted()) throw new IllegalStateException("Android VPN permission is not granted");
-        lastAttemptServerReplied = false;
 
         // Always tear down a stale service/tun from a previous attempt/process before a new relay.
         // This is cheap when nothing is running and prevents an old session from blocking failover.
         stopEngine(650L);
-        // OpenVPNService teardown is asynchronous. Do not start the replacement profile while
-        // Android still reports the old VPN as the active transport; that race produces a
-        // transient NONETWORK on some Samsung/Android 16 builds.
-        waitForUnderlyingNetwork(1_800L);
 
         String config = OpenVpnProfileUtil.configWithDirectIp(relay);
         if (config == null || config.trim().isEmpty()) throw new IOException("empty OpenVPN profile");
 
         OpenVpnProfileUtil.Endpoint endpoint = OpenVpnProfileUtil.endpoint(relay);
-        boolean tcpTransport = endpoint == null || endpoint.tcp;
         String endpointText = endpoint == null ? "?" : ((endpoint.tcp ? "tcp" : "udp") + ":" + endpoint.port);
         AppLog.i("tunnel", "profile relay=" + relay.ip + " endpoint=" + endpointText + " chars=" + config.length());
         if (progress != null) progress.onStage("PROFILE", endpointText);
@@ -157,10 +144,6 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
             ConfigParser parser = new ConfigParser();
             parser.parseConfig(new StringReader(config));
             profile = parser.convertProfile();
-            applyVpnGateCompatibility(profile);
-            if (!tcpTransport && udpLowMtuRescue) {
-                applyUdpMtuRescue(profile);
-            }
         } catch (Throwable e) {
             lastFailure = "profile parse: " + e.getClass().getSimpleName();
             AppLog.e("tunnel", "profile parse failed for " + relay.ip, e);
@@ -210,22 +193,13 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
         boolean signaled = false;
         long overallMs = Math.max(15_000L, timeoutMs);
         long overallDeadline = SystemClock.elapsedRealtime() + overallMs;
-        // UDP is our first escape path on networks that let TCP connect but then filter the
-        // OpenVPN control channel. A dead UDP relay should be abandoned quickly; a replying
-        // relay still gets enough time to finish TLS and receive PUSH_REPLY.
-        long preReplyStallMs = tcpTransport ? 12_000L : 5_500L;
-        // Once UDP actually answers, it is alive. Let OpenVPN's own 60s TLS window finish.
-        // v0.3.7 used 28s here and could kill the first genuinely promising UDP relay.
-        long postReplyStallMs = tcpTransport ? 65_000L : 70_000L;
-        AppLog.i("tunnel", "watchdog relay=" + relay.ip + " transport="
-                + (tcpTransport ? "tcp" : "udp") + " overallMs=" + overallMs
-                + " preReplyStallMs=" + preReplyStallMs
-                + " postReplyStallMs=" + postReplyStallMs);
         try {
             while (!(signaled = attempt.done.await(250L, TimeUnit.MILLISECONDS))) {
                 long now = SystemClock.elapsedRealtime();
                 long idle = now - attempt.lastProgressAt;
-                long stallLimit = attempt.serverReplied ? postReplyStallMs : preReplyStallMs;
+                // Before the server replies we fail quickly. Once TLS/AUTH has started, VPN Gate
+                // can legitimately need well over ten seconds to finish the handshake and PUSH.
+                long stallLimit = attempt.serverReplied ? 22_000L : 12_000L;
                 if (idle >= stallLimit) {
                     attempt.failure = "stalled " + idle + " ms at " + attempt.lastStage;
                     break;
@@ -358,21 +332,7 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
         }
         if (level == ConnectionStatus.LEVEL_CONNECTING_SERVER_REPLIED) {
             attempt.serverReplied = true;
-            lastAttemptServerReplied = true;
             attempt.lastProgressAt = SystemClock.elapsedRealtime();
-        }
-
-        // A rapid stop/start can make ics-openvpn emit NONETWORK for a few hundred ms even while
-        // Android already has a usable cellular/Wi-Fi transport. Treat only that early case as a
-        // teardown race; a real network loss still remains terminal.
-        if (level == ConnectionStatus.LEVEL_NONETWORK) {
-            long age = SystemClock.elapsedRealtime() - attempt.launchedAt;
-            if (age < 2_200L && hasUsableUnderlyingNetwork()) {
-                AppLog.w("ovpn-state", "ignoring transient NONETWORK ageMs=" + age
-                        + " relay=" + attempt.relay.ip);
-                attempt.meaningfulProgress("NETWORK_SETTLE", "базовая сеть уже доступна; продолжаю");
-                return;
-            }
         }
 
         boolean terminal = level == ConnectionStatus.LEVEL_AUTH_FAILED
@@ -440,25 +400,16 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
             if (attempt == null) return;
 
             String low = line.toLowerCase(java.util.Locale.US);
-            if (low.contains("ehostunreach") || low.contains("no route to host")
-                    || low.contains("enetunreach") || low.contains("network is unreachable")) {
-                attempt.meaningfulProgress("NETWORK_UNREACHABLE", line);
-                attempt.failure = line;
-                attempt.success = false;
-                attempt.done.countDown();
-            } else if (line.contains("TCP connection established")) {
+            if (line.contains("TCP connection established")) {
                 attempt.meaningfulProgress("TCP_OK", "TCP соединение установлено");
             } else if (line.startsWith("TLS: Initial packet")) {
                 attempt.serverReplied = true;
-                lastAttemptServerReplied = true;
                 attempt.meaningfulProgress("TLS", "сервер ответил, TLS handshake");
             } else if (line.contains("VERIFY OK: depth=0")) {
                 attempt.serverReplied = true;
-                lastAttemptServerReplied = true;
                 attempt.meaningfulProgress("TLS_CERT_OK", "сертификат сервера проверен");
             } else if (line.contains("Peer Connection Initiated")) {
                 attempt.serverReplied = true;
-                lastAttemptServerReplied = true;
                 attempt.meaningfulProgress("PEER_OK", "TLS завершён");
             } else if (line.contains("PUSH_REQUEST")) {
                 attempt.meaningfulProgress("GET_CONFIG", "запрашиваю маршруты");
@@ -467,107 +418,12 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
             } else if (line.contains("Initialization Sequence Completed")) {
                 attempt.meaningfulProgress("INIT_COMPLETE", "OpenVPN инициализирован");
             } else if (low.contains("auth_failed") || low.contains("tls error")
-                    || low.contains("connection reset") || low.contains("certificate verify failed")
-                    || low.contains("failed to negotiate cipher") || low.contains("options error")
-                    || low.contains("tls key negotiation failed") || low.contains("inactivity timeout")) {
+                    || low.contains("connection reset") || low.contains("certificate verify failed")) {
                 attempt.meaningfulProgress("ENGINE_ERROR", line);
-                // Yinglong owns failover. Do not let OpenVPN spend another minute retrying
-                // the same endpoint after a fatal TLS/control-channel error.
-                attempt.failure = line;
-                attempt.success = false;
-                attempt.done.countDown();
             }
         } catch (Throwable e) {
             AppLog.e("openvpn", "failed to render engine log item", e);
         }
-    }
-
-    private void applyUdpMtuRescue(VpnProfile profile) {
-        if (profile == null) return;
-
-        // Retry-only strategy for a UDP relay that already answered.
-        // OpenVPN 2.7 uses max-packet-size to cap control-channel packets and mssfix.
-        String extra = safe(profile.mCustomConfigOptions);
-        String low = extra.toLowerCase(java.util.Locale.US);
-        if (!low.contains("max-packet-size")) {
-            if (!extra.isEmpty() && !extra.endsWith("\n")) extra += "\n";
-            extra += "max-packet-size 1000\n";
-        }
-        profile.mUseCustomConfig = true;
-        profile.mCustomConfigOptions = extra;
-        AppLog.i("tunnel", "UDP MTU rescue enabled max-packet-size=1000");
-    }
-
-    private void applyVpnGateCompatibility(VpnProfile profile) {
-        if (profile == null) return;
-
-        // VPN Gate still has many old SoftEther/OpenVPN peers. OpenVPN 2.6/2.7 needs a
-        // data-cipher fallback when talking to pre-NCP OpenVPN 2.3 peers. compat-mode 2.3.7
-        // enables that fallback while avoiding the <=2.3.6 rule that also lowers TLS minimums.
-        if (profile.mCompatMode <= 0) profile.mCompatMode = 20307;
-
-        String cipher = safe(profile.mCipher).trim();
-        String dataCiphers = safe(profile.mDataCiphers).trim();
-        if (!cipher.isEmpty() && !containsCipher(dataCiphers, cipher)) {
-            profile.mDataCiphers = dataCiphers.isEmpty() ? cipher : dataCiphers + ":" + cipher;
-            dataCiphers = profile.mDataCiphers;
-        }
-
-        // VPN Gate profiles intentionally carry old compatibility material and many
-        // relays still use SHA1/AES-CBC era settings. OpenVPN 2.7 + OpenSSL 3 can load
-        // those reliably with the legacy provider, while keeping the certificate profile
-        // at OpenVPN's "legacy" level rather than the weaker "insecure" level.
-        profile.mUseLegacyProvider = true;
-        if (safe(profile.mTlSCertProfile).trim().isEmpty()) profile.mTlSCertProfile = "legacy";
-
-        // Require a TLS server certificate rather than accepting a generic certificate role.
-        profile.mExpectTLSCert = true;
-        AppLog.i("tunnel", "profile compatibility compatMode=" + profile.mCompatMode
-                + " cipher=" + safe(profile.mCipher)
-                + " dataCiphers=" + safe(profile.mDataCiphers)
-                + " remoteCertTls=" + profile.mExpectTLSCert
-                + " authType=" + profile.mAuthenticationType
-                + " legacyProvider=" + profile.mUseLegacyProvider
-                + " tlsCertProfile=" + safe(profile.mTlSCertProfile));
-    }
-
-    private static boolean containsCipher(String list, String cipher) {
-        if (list == null || list.isEmpty() || cipher == null || cipher.isEmpty()) return false;
-        for (String item : list.split(":")) if (cipher.equalsIgnoreCase(item.trim())) return true;
-        return false;
-    }
-
-    private boolean hasUsableUnderlyingNetwork() {
-        if (connectivity == null) return true;
-        try {
-            Network active = connectivity.getActiveNetwork();
-            NetworkCapabilities caps = active == null ? null : connectivity.getNetworkCapabilities(active);
-            return caps != null
-                    && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                    && !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN);
-        } catch (Throwable t) {
-            AppLog.e("tunnel", "underlying network check failed", t);
-            return true;
-        }
-    }
-
-    private void waitForUnderlyingNetwork(long timeoutMs) {
-        long deadline = SystemClock.elapsedRealtime() + Math.max(300L, timeoutMs);
-        do {
-            if (hasUsableUnderlyingNetwork()) {
-                sleepQuiet(180L);
-                AppLog.i("tunnel", "underlying network ready after VPN teardown");
-                return;
-            }
-            sleepQuiet(120L);
-        } while (SystemClock.elapsedRealtime() < deadline);
-        AppLog.w("tunnel", "underlying network settle timeout; starting next profile anyway");
-        sleepQuiet(180L);
-    }
-
-    private static void sleepQuiet(long ms) {
-        try { Thread.sleep(ms); }
-        catch (InterruptedException e) { Thread.currentThread().interrupt(); }
     }
 
     private boolean waitForAndroidVpnTransport(long timeoutMs) {

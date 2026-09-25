@@ -79,13 +79,15 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
         // conventions exist: anonymous login (the actual hub account type) and
         // vpn/vpn password login.  Try both on the SAME endpoint before throwing
         // a good TLS listener away.
+        // VPN Gate convention: username vpn / password vpn.
+        // Give one auth attempt the full budget; if it fails, the session manager
+        // falls back to the relay's official OpenVPN profile.
         val variants = arrayOf(
-            AuthVariant("ANONYMOUS", "", AuthMethod.ANONYMOUS),
             AuthVariant("PASSWORD", "vpn", AuthMethod.AUTO)
         )
-        val perVariantTimeout = (timeoutMs / variants.size)
-            .coerceAtLeast(7_000L)
-            .coerceAtMost(12_000L)
+        val perVariantTimeout = timeoutMs
+            .coerceAtLeast(12_000L)
+            .coerceAtMost(18_000L)
 
         var lastReason = ""
         for ((index, variant) in variants.withIndex()) {
@@ -162,11 +164,11 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
             useUdp = false,
             udpPort = 0,
             udpOnly = false,
-            connectTimeoutMs = timeoutMs.coerceIn(5_000L, 9_000L).toInt(),
+            connectTimeoutMs = timeoutMs.coerceIn(12_000L, 18_000L).toInt(),
             country = relay.countryShort ?: "",
             clientProductName = "Yinglong",
-            clientVersion = "0.3.12",
-            clientBuild = 16
+            clientVersion = "0.3.13",
+            clientBuild = 17
         )
 
         val intent = Intent(appContext, SoftEtherVpnService::class.java).apply {

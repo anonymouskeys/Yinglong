@@ -76,6 +76,12 @@ jobs:
           bash third_party/SoftEtherClient/src/main/cpp/build-openssl-android.sh --headers-only
           test -f third_party/SoftEtherClient/src/main/cpp/openssl/include/openssl/configuration.h
 
+      - name: Refresh bundled VPN Gate relay seed
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/update_seed.sh
+
       - name: Build debug APK
         run: gradle --no-daemon :app:assembleDebug
 
