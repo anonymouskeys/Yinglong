@@ -27,6 +27,7 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
     @Volatile private var connected = false
     @Volatile private var lostLatch = CountDownLatch(0)
     @Volatile private var failure = ""
+    @Volatile private var failureStage = ""
     @Volatile private var healthy = false
 
     private class Attempt(
@@ -99,8 +100,10 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
             }
 
             lastReason = failure
-            val authRelated = lastReason.contains("AUTH", ignoreCase = true) ||
-                lastReason.contains("authentication", ignoreCase = true)
+            val failedStage = failureStage
+            val authRelated = failedStage.equals("AUTH", ignoreCase = true) ||
+                failedStage.equals("AUTHENTICATING", ignoreCase = true) ||
+                lastReason.contains("authentication failed", ignoreCase = true)
 
             if (index + 1 < variants.size && authRelated) {
                 AppLog.w(
@@ -136,6 +139,7 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
         progress: Progress?
     ): Boolean {
         failure = ""
+        failureStage = ""
         stopInternal(900L)
 
         val attempt = Attempt(relay, port, variant.label, progress)
@@ -161,8 +165,8 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
             connectTimeoutMs = timeoutMs.coerceIn(5_000L, 9_000L).toInt(),
             country = relay.countryShort ?: "",
             clientProductName = "Yinglong",
-            clientVersion = "0.3.11",
-            clientBuild = 15
+            clientVersion = "0.3.12",
+            clientBuild = 16
         )
 
         val intent = Intent(appContext, SoftEtherVpnService::class.java).apply {
@@ -202,6 +206,7 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
         }
 
         if (!signaled) {
+            failureStage = attempt.lastStage
             failure = "SoftEther timeout at ${attempt.lastStage} auth=${variant.label}"
             AppLog.w("se-tunnel", "$failure relay=${relay.ip} port=$port")
             attempt.stage("TIMEOUT", failure)
@@ -210,6 +215,7 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
         }
 
         if (!attempt.success) {
+            if (failureStage.isBlank()) failureStage = attempt.lastStage
             if (failure.isBlank()) {
                 failure = "SoftEther failed at ${attempt.lastStage} auth=${variant.label}"
             }
@@ -259,6 +265,7 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
                 connected = true
                 lostLatch = CountDownLatch(1)
                 failure = ""
+                failureStage = ""
                 attempt?.stage("CONNECTED", assignedIp.ifBlank { attempt.relay.ip })
                 if (attempt != null) {
                     attempt.success = true
@@ -266,7 +273,9 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
                 }
             }
             SoftEtherVpnService.STATE_ERROR -> {
-                failure = "SoftEther ERROR after ${attempt?.lastStage ?: "unknown"}"
+                val failedAt = attempt?.lastStage ?: "unknown"
+                failureStage = failedAt
+                failure = "SoftEther ERROR after $failedAt"
                 attempt?.stage("ERROR", failure)
                 if (attempt != null && attempt.done.count > 0) {
                     attempt.success = false
@@ -279,6 +288,7 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
             }
             SoftEtherVpnService.STATE_DISCONNECTED -> {
                 if (attempt != null && attempt.sawStart && attempt.done.count > 0) {
+                    if (failureStage.isBlank()) failureStage = attempt.lastStage
                     if (attempt.lastStage == "TIMEOUT" && failure.isNotBlank()) {
                         AppLog.i("se-tunnel", "disconnect after timeout; preserving reason=$failure")
                         attempt.stage("DISCONNECTED", failure)

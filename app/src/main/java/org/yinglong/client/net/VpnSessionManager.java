@@ -5,6 +5,7 @@ import android.content.SharedPreferences;
 
 import org.yinglong.client.catalog.Relay;
 import org.yinglong.client.catalog.RelayStore;
+import org.yinglong.client.catalog.RelayUpdater;
 import org.yinglong.client.diag.AppLog;
 
 import java.util.HashSet;
@@ -17,8 +18,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Yinglong v0.3.11: local VPN Gate TCP profile port -> SoftEther probe -> VPNGATE auth fallback -> DHCP -> VpnService.
- * No catalogue refresh happens on START.
+ * Yinglong v0.3.12: refresh/merge VPN Gate relays -> probe native/catalog SoftEther ports -> DHCP -> VpnService.
  */
 public final class VpnSessionManager {
     public enum State { IDLE, SEARCHING, CONNECTING, CONNECTED, STOPPING, ERROR }
@@ -40,8 +40,8 @@ public final class VpnSessionManager {
 
     private static final int FAST_SCAN_HOSTS = 120;
     private static final int FAST_ATTEMPTS = 10;
-    private static final int FULL_ATTEMPTS = 18;
-    private static final long SOFTETHER_ATTEMPT_TIMEOUT_MS = 24_000L;
+    private static final int BOOTSTRAP_ROUNDS = 6;
+    private static final long SOFTETHER_ATTEMPT_TIMEOUT_MS = 18_000L;
 
     public static VpnSessionManager get(Context context) {
         VpnSessionManager local = instance;
@@ -116,10 +116,19 @@ public final class VpnSessionManager {
     private void runSession(long token) {
         String lastFailure = "";
         try {
+            setState(State.SEARCHING, "SoftEther TLS: загружаю свежие relay VPN Gate…");
+            try {
+                int pool = new RelayUpdater(context).bootstrapMerged(BOOTSTRAP_ROUNDS);
+                AppLog.i("session", "live relay bootstrap merged; pool=" + pool);
+            } catch (Throwable e) {
+                AppLog.w("session", "live relay bootstrap unavailable; using local pool: "
+                        + e.getClass().getSimpleName() + ": " + safe(e.getMessage()));
+            }
+
             while (active(token)) {
                 List<Relay> relays = new RelayStore(context).read();
-                AppLog.i("session", "local relay pool size=" + relays.size()
-                        + " (catalog refresh disabled on START)");
+                AppLog.i("session", "relay pool size=" + relays.size()
+                        + " (live samples merged when reachable)");
                 if (relays.isEmpty()) throw new IllegalStateException("локальный пул relay пуст");
 
                 Set<String> tried = new HashSet<>();
@@ -128,7 +137,6 @@ public final class VpnSessionManager {
                 int connectedPort = 0;
 
                 int[] hostLimits = {Math.min(FAST_SCAN_HOSTS, relays.size()), relays.size()};
-                int[] attemptLimits = {FAST_ATTEMPTS, FULL_ATTEMPTS};
                 int[] probeTimeouts = {850, 1300};
 
                 phaseLoop:
@@ -162,19 +170,31 @@ public final class VpnSessionManager {
                     }
 
                     AppLog.i("session", phaseName + " SoftEther candidates=" + ranked.size());
-                    int attempted = 0;
 
+                    int remaining = 0;
+                    for (SoftEtherProbe.Result candidate : ranked) {
+                        if (candidate == null || candidate.relay == null) continue;
+                        String candidateKey = candidate.relay.ip + ":" + candidate.port;
+                        if (!tried.contains(candidateKey)) remaining++;
+                    }
+                    int phaseAttemptLimit = phase == 0
+                            ? Math.min(FAST_ATTEMPTS, remaining)
+                            : remaining;
+                    if (phaseAttemptLimit <= 0) continue;
+
+                    int attempted = 0;
                     for (SoftEtherProbe.Result result : ranked) {
                         if (!active(token)) return;
                         if (result == null || result.relay == null) continue;
 
                         Relay relay = result.relay;
                         String key = relay.ip + ":" + result.port;
-                        if (!tried.add(key)) continue;
-                        if (attempted >= attemptLimits[phase]) break;
+                        if (tried.contains(key)) continue;
+                        if (attempted >= phaseAttemptLimit) break;
+                        tried.add(key);
                         attempted++;
 
-                        String base = "SoftEther " + attempted + "/" + attemptLimits[phase]
+                        String base = "SoftEther " + attempted + "/" + phaseAttemptLimit
                                 + " • " + safe(relay.countryShort) + " " + relay.ip
                                 + " • tls:" + result.port;
                         setState(State.CONNECTING, base);

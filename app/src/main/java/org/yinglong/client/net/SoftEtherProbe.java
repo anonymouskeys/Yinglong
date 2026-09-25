@@ -29,6 +29,8 @@ import java.util.concurrent.Future;
  * No network catalogue refresh is performed here.
  */
 public final class SoftEtherProbe {
+    private static final int[] NATIVE_PORTS = {443, 992, 5555};
+
     private SoftEtherProbe() {}
 
     public interface ProgressListener {
@@ -68,16 +70,6 @@ public final class SoftEtherProbe {
         for (Relay relay : sorted) {
             if (relay == null || relay.ip == null || relay.ip.trim().isEmpty()) continue;
 
-            OpenVpnProfileUtil.Endpoint ep;
-            try {
-                ep = OpenVpnProfileUtil.endpoint(relay);
-            } catch (Throwable ignored) {
-                continue;
-            }
-
-            // UDP OpenVPN ports are not SoftEther SSL-VPN TCP listeners.
-            if (ep == null || !ep.tcp || ep.port <= 0 || ep.port > 65535) continue;
-
             String ip = relay.ip.trim();
             HostTarget target = targets.get(ip);
             if (target == null) {
@@ -85,7 +77,19 @@ public final class SoftEtherProbe {
                 target = new HostTarget(relay);
                 targets.put(ip, target);
             }
-            target.ports.add(ep.port);
+
+            // Prefer the server's native SoftEther listener candidates.
+            for (int port : NATIVE_PORTS) target.ports.add(port);
+
+            // Also retain the concrete TCP port advertised in the VPN Gate
+            // OpenVPN profile. It may be useful on servers with a custom port.
+            try {
+                OpenVpnProfileUtil.Endpoint ep = OpenVpnProfileUtil.endpoint(relay);
+                if (ep != null && ep.tcp && ep.port > 0 && ep.port <= 65535) {
+                    target.ports.add(ep.port);
+                }
+            } catch (Throwable ignored) {
+            }
         }
 
         List<HostTarget> hosts = new ArrayList<>(targets.values());
@@ -94,7 +98,7 @@ public final class SoftEtherProbe {
 
         AppLog.i(
                 "se-probe",
-                "SoftEther scan start source=local-vpngate-tcp-profiles hosts=" + hosts.size()
+                "SoftEther scan start source=catalog+native-defaults hosts=" + hosts.size()
                         + " endpoints=" + endpointCount
                         + " concurrency=" + concurrency
                         + " timeoutMs=" + timeoutMs
@@ -103,7 +107,7 @@ public final class SoftEtherProbe {
         if (hosts.isEmpty()) {
             AppLog.w(
                     "se-probe",
-                    "no TCP profile ports in local catalogue; refusing blind 443/992/5555 scan"
+                    "no relay hosts available for SoftEther scan"
             );
             return new ArrayList<>();
         }
@@ -145,6 +149,9 @@ public final class SoftEtherProbe {
         }
 
         out.sort((a, b) -> {
+            int pa = nativePortPriority(a.port);
+            int pb = nativePortPriority(b.port);
+            if (pa != pb) return Integer.compare(pa, pb);
             if (a.connectMs != b.connectMs) return Long.compare(a.connectMs, b.connectMs);
             int score = Long.compare(b.relay.score, a.relay.score);
             if (score != 0) return score;
@@ -178,5 +185,12 @@ public final class SoftEtherProbe {
         }
 
         return out;
+    }
+
+    private static int nativePortPriority(int port) {
+        if (port == 443) return 0;
+        if (port == 992) return 1;
+        if (port == 5555) return 2;
+        return 3;
     }
 }

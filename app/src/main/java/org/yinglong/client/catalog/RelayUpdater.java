@@ -65,6 +65,50 @@ public final class RelayUpdater {
         return fresh;
     }
 
+    /**
+     * Pull several short-timeout VPN Gate CSV samples before connecting.
+     * VPN Gate returns a partial slice per request, so several cache-busted
+     * rounds are merged into the persistent last-known-good pool.
+     */
+    public int bootstrapMerged(int rounds) throws IOException {
+        int pool = store.read().size();
+        IOException last = null;
+        int ok = 0;
+        int n = Math.max(1, Math.min(rounds, 8));
+        AppLog.i("catalog", "bootstrapMerged rounds=" + n + " startingPool=" + pool);
+
+        for (int i = 0; i < n; i++) {
+            try {
+                String url = VPN_GATE_CSV + "?_yinglong_bootstrap="
+                        + System.currentTimeMillis() + "_" + i;
+                List<Relay> fresh = fetchCsv(url, 4_500, 8_000);
+                AppLog.i("catalog", "bootstrap round=" + (i + 1)
+                        + " received=" + fresh.size());
+                pool = store.mergeRelays(fresh, MINIMUM_ACCEPTED_RELAYS);
+                health.markSeen(fresh);
+                ok++;
+            } catch (IOException e) {
+                last = e;
+                AppLog.w("catalog", "bootstrap round=" + (i + 1)
+                        + " failed: " + e.getMessage());
+            }
+
+            if (i + 1 < n) {
+                try {
+                    Thread.sleep(350L);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+        }
+
+        if (ok == 0 && last != null) throw last;
+        AppLog.i("catalog", "bootstrapMerged complete successfulRounds=" + ok
+                + " pool=" + pool);
+        return pool;
+    }
+
     public int refreshMerged(int rounds) throws IOException {
         int pool = store.read().size();
         IOException last = null;
@@ -181,7 +225,7 @@ public final class RelayUpdater {
         c.setInstanceFollowRedirects(true);
         c.setConnectTimeout(Math.max(1_000, connectTimeoutMs));
         c.setReadTimeout(Math.max(1_000, readTimeoutMs));
-        c.setRequestProperty("User-Agent", "Yinglong/0.3.5 (+VPN Gate client)");
+        c.setRequestProperty("User-Agent", "Yinglong/0.3.12 (+VPN Gate client)");
         c.setRequestProperty("Accept", "text/plain,text/csv,text/html,application/x-openvpn-profile,*/*;q=0.1");
         try {
             int code = c.getResponseCode();
