@@ -119,6 +119,7 @@ public final class VpnSessionManager {
                 if (relays.isEmpty()) throw new IllegalStateException("локальный пул relay пуст");
 
                 Set<String> tried = new HashSet<>();
+                boolean preferUdp = false;
                 boolean connectedThisRound = false;
                 Relay connectedRelay = null;
 

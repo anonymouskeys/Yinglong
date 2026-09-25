@@ -19,6 +19,18 @@ public final class OpenVpnProfileUtil {
         Endpoint(int port, boolean tcp) { this.port = port; this.tcp = tcp; }
     }
 
+    /** Stable identity for one concrete VPN transport, not merely one server IP. */
+    public static String endpointKey(Relay relay) {
+        if (relay == null) return "?";
+        String ip = relay.ip == null ? "" : relay.ip.trim();
+        try {
+            Endpoint ep = endpoint(relay);
+            if (ep != null) return ip + "|" + (ep.tcp ? "tcp" : "udp") + "|" + ep.port;
+        } catch (Throwable ignored) {}
+        String raw = relay.openVpnConfigBase64 == null ? "" : relay.openVpnConfigBase64;
+        return ip + "|profile|" + Integer.toHexString(raw.hashCode());
+    }
+
     public static String decode(Relay relay) {
         byte[] raw = Base64.decode(relay.openVpnConfigBase64, Base64.DEFAULT);
         return new String(raw, StandardCharsets.UTF_8);

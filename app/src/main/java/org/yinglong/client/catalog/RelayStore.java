@@ -4,6 +4,8 @@ import android.content.Context;
 import android.system.ErrnoException;
 import android.system.Os;
 
+import org.yinglong.client.net.OpenVpnProfileUtil;
+
 import java.io.BufferedWriter;
 import java.io.File;
 import java.io.FileOutputStream;
@@ -90,7 +92,7 @@ public final class RelayStore {
                 && r.openVpnConfigBase64 != null && !r.openVpnConfigBase64.isEmpty();
     }
 
-    private static String key(Relay r) { return r.ip.trim(); }
+    private static String key(Relay r) { return OpenVpnProfileUtil.endpointKey(r); }
 
     private void writeAtomically(List<Relay> relays) throws IOException {
         File tmp = tmpFile();
