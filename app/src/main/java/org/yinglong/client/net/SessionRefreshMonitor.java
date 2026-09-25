@@ -5,31 +5,29 @@ import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 
-import org.yinglong.client.catalog.RelayUpdater;
-
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/** Refreshes the relay catalogue after Android reports an active VPN transport. */
-public final class VpnCatalogRefreshMonitor {
-    private static final long COOLDOWN_MS = 10L * 60L * 1000L;
-
+/**
+ * One-shot post-connect maintenance. It exists only for the user-started session.
+ * No app-start polling, no periodic background loop.
+ */
+public final class SessionRefreshMonitor {
     private final Context context;
     private final ConnectivityManager cm;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
-    private final AtomicBoolean refreshing = new AtomicBoolean(false);
-    private volatile long lastAttemptMs = 0L;
-    private boolean registered = false;
+    private final AtomicBoolean fired = new AtomicBoolean(false);
+    private volatile boolean registered;
 
-    public VpnCatalogRefreshMonitor(Context context) {
+    public SessionRefreshMonitor(Context context) {
         this.context = context.getApplicationContext();
         this.cm = (ConnectivityManager) this.context.getSystemService(Context.CONNECTIVITY_SERVICE);
     }
 
     private final ConnectivityManager.NetworkCallback callback = new ConnectivityManager.NetworkCallback() {
         @Override public void onCapabilitiesChanged(Network network, NetworkCapabilities capabilities) {
-            if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) triggerRefresh();
+            if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) fireOnce();
         }
     };
 
@@ -39,22 +37,30 @@ public final class VpnCatalogRefreshMonitor {
         registered = true;
         Network active = cm.getActiveNetwork();
         NetworkCapabilities caps = active == null ? null : cm.getNetworkCapabilities(active);
-        if (caps != null && caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) triggerRefresh();
+        if (caps != null && caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) fireOnce();
     }
 
-    private void triggerRefresh() {
-        long now = System.currentTimeMillis();
-        if (now - lastAttemptMs < COOLDOWN_MS) return;
-        if (!refreshing.compareAndSet(false, true)) return;
-        lastAttemptMs = now;
+    private void fireOnce() {
+        if (!fired.compareAndSet(false, true)) return;
         io.execute(() -> {
             try {
-                new RelayUpdater(context).refresh();
+                new PostConnectMaintenance(context).runOnce();
             } catch (Exception ignored) {
-                // Keep last known-good snapshot. The next VPN event can retry.
+                // Last known-good accumulated pool remains available.
             } finally {
-                refreshing.set(false);
+                unregister();
             }
         });
+    }
+
+    public void stop() {
+        unregister();
+        io.shutdownNow();
+    }
+
+    private synchronized void unregister() {
+        if (!registered || cm == null) return;
+        try { cm.unregisterNetworkCallback(callback); } catch (Exception ignored) {}
+        registered = false;
     }
 }
