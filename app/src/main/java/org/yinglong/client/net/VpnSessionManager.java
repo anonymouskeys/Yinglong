@@ -46,8 +46,8 @@ public final class VpnSessionManager {
     private static final int SOFTETHER_MAX_RELAY_ATTEMPTS = 0;
     private static final long SOFTETHER_ATTEMPT_TIMEOUT_MS = 55_000L;
     private static final int OPENVPN_MAX_ATTEMPTS = 24;
-    private static final long OPENVPN_TCP_TIMEOUT_MS = 40_000L;
-    private static final long OPENVPN_UDP_TIMEOUT_MS = 45_000L;
+    private static final long OPENVPN_TCP_TIMEOUT_MS = 75_000L;
+    private static final long OPENVPN_UDP_TIMEOUT_MS = 60_000L;
 
     public static VpnSessionManager get(Context context) {
         VpnSessionManager local = instance;
@@ -256,10 +256,6 @@ public final class VpnSessionManager {
                     AppLog.w("session",
                             "SoftEther exhausted/bypassed; starting OpenVPN profile fallback");
 
-                    // Clean up once before the whole OpenVPN round. Relay changes
-                    // then happen by profile replacement inside one live service.
-                    openVpn.prepareForFailoverRound();
-
                     List<RelayProbe.Result> ovpnCandidates = RelayProbe.rank(
                             relays,
                             relays.size(),
@@ -465,7 +461,7 @@ public final class VpnSessionManager {
         int ui = 0;
 
         while (ti < tcp.size() || ui < udp.size()) {
-            for (int n = 0; n < 2 && ti < tcp.size(); n++) {
+            if (ti < tcp.size()) {
                 out.add(tcp.get(ti++));
             }
             if (ui < udp.size()) {
