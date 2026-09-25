@@ -15,7 +15,7 @@ import java.util.Set;
 /** Runs once after a real VPN session comes up, never as a permanent poller. */
 public final class PostConnectMaintenance {
     private static final long STALE_MS = 7L * 24L * 60L * 60L * 1000L;
-    private static final int MAX_HEALTH_PROBES = 32;
+    private static final int MAX_HEALTH_PROBES = 48;
     private static final int FAILURES_BEFORE_PRUNE = 3;
 
     private final Context context;
@@ -25,11 +25,11 @@ public final class PostConnectMaintenance {
         AppLog.i("maintenance", "post-connect maintenance started");
         RelayUpdater updater = new RelayUpdater(context);
         try {
-            int pool = updater.refreshMerged(4);
+            int pool = updater.refreshMerged(6);
             AppLog.i("maintenance", "CSV merge finished pool=" + pool);
         } catch (Exception e) { AppLog.e("maintenance", "CSV refresh failed", e); }
         try {
-            int pool = updater.harvestOfficialHtml(16);
+            int pool = updater.harvestOfficialHtml(24);
             AppLog.i("maintenance", "HTML harvest finished pool=" + pool);
         } catch (Exception e) { AppLog.e("maintenance", "HTML harvest failed", e); }
         try { pruneConfirmedDead(); } catch (Exception e) { AppLog.e("maintenance", "prune failed", e); }

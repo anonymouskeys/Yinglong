@@ -12,13 +12,15 @@ public final class YinglongApp extends Application {
         super.onCreate();
         AppLog.init(this);
         AppLog.installCrashHandler(this);
-        AppLog.i("app", "Yinglong process started v0.3.1 sdk=" + Build.VERSION.SDK_INT
+        AppLog.i("app", "Yinglong process started v0.3.3 sdk=" + Build.VERSION.SDK_INT
                 + " device=" + Build.MANUFACTURER + " " + Build.MODEL);
         try {
-            new RelayStore(this).ensureSeeded();
-            AppLog.i("catalog", "relay seed ready; count=" + new RelayStore(this).read().size());
+            RelayStore store = new RelayStore(this);
+            store.ensureSeeded();
+            int count = store.mergeBundledSeed();
+            AppLog.i("catalog", "bundled seed merged; active pool=" + count);
         } catch (Throwable e) {
-            AppLog.e("catalog", "failed to seed relay catalogue", e);
+            AppLog.e("catalog", "failed to seed/merge relay catalogue", e);
         }
         try {
             VpnSessionManager.get(this);

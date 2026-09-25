@@ -8,13 +8,12 @@ import java.io.BufferedWriter;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.FileReader;
-import java.io.FileWriter;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 
 /** Persistent accumulated relay pool. */
@@ -41,6 +40,18 @@ public final class RelayStore {
         }
         validateSnapshot(tmp, 1);
         replaceAtomically(tmp, active);
+    }
+
+    /** Merge the seed bundled in the newly installed APK into the user's existing pool. */
+    public synchronized int mergeBundledSeed() throws IOException {
+        ensureSeeded();
+        List<Relay> bundled;
+        try (InputStream in = context.getAssets().open(SEED_ASSET);
+             InputStreamReader r = new InputStreamReader(in, java.nio.charset.StandardCharsets.UTF_8)) {
+            bundled = RelayCsv.parse(r);
+        }
+        if (bundled.isEmpty()) return read().size();
+        return mergeRelays(bundled, 1);
     }
 
     public synchronized List<Relay> read() throws IOException {
@@ -115,7 +126,6 @@ public final class RelayStore {
 
     private static String csv(String s) {
         if (s == null) return "";
-        // The VPN Gate feed is not RFC-4180 quoted; keep our normalized cache parseable.
         return s.replace(',', ' ').replace('\r', ' ').replace('\n', ' ');
     }
 

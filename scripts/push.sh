@@ -7,6 +7,13 @@ MSG="${*:-Update Yinglong}"
 OWNER="$(gh api user --jq .login)"
 REPO="$OWNER/Yinglong"
 
+# Best-effort seed refresh before every build. If censorship blocks VPN Gate right now,
+# keep the previous bundled pool rather than preventing source pushes.
+echo "[Yinglong] Refreshing bundled relay seed (best effort)…"
+if ! bash scripts/update_seed.sh; then
+  echo "[Yinglong] Seed refresh failed; keeping existing relays_seed.csv" >&2
+fi
+
 git add .
 if ! git diff --cached --quiet; then
   git commit -m "$MSG"

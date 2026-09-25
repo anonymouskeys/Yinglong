@@ -8,35 +8,49 @@ URL="https://www.vpngate.net/api/iphone/"
 mkdir -p "$WORK" "$(dirname "$DEST")"
 trap 'rm -rf "$WORK"' EXIT
 
-# Keep the previous bundled pool and merge several fresh partial samples into it.
-# VPN Gate intentionally exposes only a portion of its live population per list.
 COMBINED="$WORK/combined.csv"
 : > "$COMBINED"
 
+# VPN Gate intentionally returns only a partial list. Keep the previous seed and merge
+# several live samples instead of replacing the pool with ~100 entries every build.
 for i in 1 2 3 4 5 6; do
-  echo "[Yinglong] VPN Gate sample $i/6…"
+  echo "[Yinglong] VPN Gate CSV sample $i/6…"
   F="$WORK/sample-$i.csv"
   NONCE="$(date +%s)-$i-$$"
   if curl --fail --location --silent --show-error \
       --retry 2 --retry-delay 1 --connect-timeout 15 --max-time 120 \
-      -A 'Yinglong-seed-builder/0.2' \
+      -H 'Cache-Control: no-cache' \
+      -A 'Yinglong-seed-builder/0.3.3' \
       "$URL?_yinglong=$NONCE" -o "$F"; then
     if grep -q '^#HostName,IP,Score,Ping,Speed,CountryLong,CountryShort' "$F"; then
       grep -Ev '^(\*vpn_servers|\*|#|[[:space:]]*$)' "$F" >> "$COMBINED" || true
     fi
   fi
   sleep 1
- done
+done
 
+# Also keep every profile bundled by previous Yinglong builds.
 if [ -f "$DEST" ]; then
   grep -Ev '^(\*vpn_servers|\*|#|[[:space:]]*$)' "$DEST" >> "$COMBINED" || true
+fi
+
+# The official HTML page can expose profiles that are absent from the current CSV slice.
+# This is optional so a Termux installation without Python still builds normally.
+if command -v python >/dev/null 2>&1; then
+  HTML_EXTRA="$WORK/html-extra.csv"
+  if python "$ROOT/scripts/harvest_official_html.py" "$COMBINED" "$HTML_EXTRA" 48; then
+    cat "$HTML_EXTRA" >> "$COMBINED" || true
+  else
+    echo "[Yinglong] HTML harvest failed; continuing with CSV pool" >&2
+  fi
+else
+  echo "[Yinglong] python not found; skipping official HTML harvest" >&2
 fi
 
 OUT="$WORK/out.csv"
 {
   echo '*vpn_servers'
   echo '#HostName,IP,Score,Ping,Speed,CountryLong,CountryShort,NumVpnSessions,Uptime,TotalUsers,TotalTraffic,LogType,Operator,Message,OpenVPN_ConfigData_Base64'
-  # Field 2 is always IP; newest downloaded occurrence wins over the old seed.
   awk -F',' 'NF >= 15 && $2 != "" && !seen[$2]++ { print }' "$COMBINED"
   echo '*'
 } > "$OUT"

@@ -60,7 +60,10 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
         final ProgressListener progress;
         volatile boolean success;
         volatile boolean sawProgress;
+        volatile boolean serverReplied;
         volatile String failure = "not connected";
+        volatile long lastProgressAt = launchedAt;
+        volatile String lastStage = "NEW";
 
         Attempt(Relay relay, ProgressListener progress) {
             this.relay = relay;
@@ -68,9 +71,23 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
         }
 
         void stage(String stage, String message) {
+            String next = stage == null || stage.isEmpty() ? "?" : stage;
+            if (!next.equals(lastStage)) {
+                lastStage = next;
+                lastProgressAt = SystemClock.elapsedRealtime();
+            }
             if (progress == null) return;
-            try { progress.onStage(stage, message == null ? "" : message); }
+            try { progress.onStage(next, message == null ? "" : message); }
             catch (Throwable ignored) {}
+        }
+
+        void meaningfulProgress(String stage, String message) {
+            lastProgressAt = SystemClock.elapsedRealtime();
+            lastStage = stage == null || stage.isEmpty() ? lastStage : stage;
+            if (progress != null) {
+                try { progress.onStage(lastStage, message == null ? "" : message); }
+                catch (Throwable ignored) {}
+            }
         }
     }
 
@@ -173,19 +190,34 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
             return false;
         }
 
-        boolean signaled;
+        boolean signaled = false;
+        long overallMs = Math.max(15_000L, timeoutMs);
+        long overallDeadline = SystemClock.elapsedRealtime() + overallMs;
         try {
-            signaled = attempt.done.await(Math.max(5000L, timeoutMs), TimeUnit.MILLISECONDS);
+            while (!(signaled = attempt.done.await(250L, TimeUnit.MILLISECONDS))) {
+                long now = SystemClock.elapsedRealtime();
+                long idle = now - attempt.lastProgressAt;
+                // Before the server replies we fail quickly. Once TLS/AUTH has started, VPN Gate
+                // can legitimately need well over ten seconds to finish the handshake and PUSH.
+                long stallLimit = attempt.serverReplied ? 22_000L : 12_000L;
+                if (idle >= stallLimit) {
+                    attempt.failure = "stalled " + idle + " ms at " + attempt.lastStage;
+                    break;
+                }
+                if (now >= overallDeadline) {
+                    attempt.failure = "overall timeout after " + overallMs + " ms at " + attempt.lastStage;
+                    break;
+                }
+            }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             attempt.failure = "interrupted";
-            signaled = false;
         }
 
         if (!signaled) {
-            attempt.failure = "connect timeout after " + timeoutMs + " ms";
             lastFailure = attempt.failure;
-            AppLog.w("tunnel", attempt.failure + " relay=" + relay.ip + " sawProgress=" + attempt.sawProgress);
+            AppLog.w("tunnel", attempt.failure + " relay=" + relay.ip
+                    + " sawProgress=" + attempt.sawProgress + " serverReplied=" + attempt.serverReplied);
             attempt.stage("TIMEOUT", attempt.failure);
             stopEngine(650L);
             return false;
@@ -298,6 +330,10 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
                 || level == ConnectionStatus.LEVEL_CONNECTING_SERVER_REPLIED) {
             attempt.sawProgress = true;
         }
+        if (level == ConnectionStatus.LEVEL_CONNECTING_SERVER_REPLIED) {
+            attempt.serverReplied = true;
+            attempt.lastProgressAt = SystemClock.elapsedRealtime();
+        }
 
         boolean terminal = level == ConnectionStatus.LEVEL_AUTH_FAILED
                 || level == ConnectionStatus.LEVEL_WAITING_FOR_USER_INPUT
@@ -334,11 +370,57 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
         AppLog.i("ovpn-state", "connected profile uuid=" + String.valueOf(uuid));
     }
 
+    private volatile boolean suppressParameterDump;
+
     @Override public void newLog(LogItem logItem) {
         if (logItem == null) return;
         try {
             String line = logItem.getString(context);
-            if (line != null && !line.trim().isEmpty()) AppLog.i("openvpn", line);
+            if (line == null) return;
+            line = line.trim();
+            if (line.isEmpty()) return;
+
+            // ics-openvpn prints hundreds of parameter lines at verbosity 4. They drown the useful
+            // handshake diagnostics, so keep the start/end marker but suppress the body.
+            if (line.contains("Current Parameter Settings:")) {
+                suppressParameterDump = true;
+                AppLog.i("openvpn", "Current Parameter Settings: <suppressed>");
+                return;
+            }
+            if (suppressParameterDump) {
+                if (line.startsWith("OpenVPN ")) {
+                    suppressParameterDump = false;
+                } else {
+                    return;
+                }
+            }
+
+            AppLog.i("openvpn", line);
+            Attempt attempt = currentAttempt;
+            if (attempt == null) return;
+
+            String low = line.toLowerCase(java.util.Locale.US);
+            if (line.contains("TCP connection established")) {
+                attempt.meaningfulProgress("TCP_OK", "TCP соединение установлено");
+            } else if (line.startsWith("TLS: Initial packet")) {
+                attempt.serverReplied = true;
+                attempt.meaningfulProgress("TLS", "сервер ответил, TLS handshake");
+            } else if (line.contains("VERIFY OK: depth=0")) {
+                attempt.serverReplied = true;
+                attempt.meaningfulProgress("TLS_CERT_OK", "сертификат сервера проверен");
+            } else if (line.contains("Peer Connection Initiated")) {
+                attempt.serverReplied = true;
+                attempt.meaningfulProgress("PEER_OK", "TLS завершён");
+            } else if (line.contains("PUSH_REQUEST")) {
+                attempt.meaningfulProgress("GET_CONFIG", "запрашиваю маршруты");
+            } else if (line.contains("PUSH_REPLY")) {
+                attempt.meaningfulProgress("PUSH_REPLY", "конфигурация получена");
+            } else if (line.contains("Initialization Sequence Completed")) {
+                attempt.meaningfulProgress("INIT_COMPLETE", "OpenVPN инициализирован");
+            } else if (low.contains("auth_failed") || low.contains("tls error")
+                    || low.contains("connection reset") || low.contains("certificate verify failed")) {
+                attempt.meaningfulProgress("ENGINE_ERROR", line);
+            }
         } catch (Throwable e) {
             AppLog.e("openvpn", "failed to render engine log item", e);
         }

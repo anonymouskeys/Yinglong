@@ -1,6 +1,7 @@
 package org.yinglong.client.net;
 
 import android.content.Context;
+import android.content.SharedPreferences;
 
 import org.yinglong.client.catalog.Relay;
 import org.yinglong.client.catalog.RelayStore;
@@ -24,6 +25,7 @@ public final class VpnSessionManager {
     private static volatile VpnSessionManager instance;
     private final Context context;
     private final OpenVpnTunnel tunnel;
+    private final SharedPreferences sessionDiag;
     private final ExecutorService sessionWorker = Executors.newSingleThreadExecutor();
     private final ExecutorService maintenanceWorker = Executors.newSingleThreadExecutor();
     private final CopyOnWriteArrayList<Listener> listeners = new CopyOnWriteArrayList<>();
@@ -33,12 +35,12 @@ public final class VpnSessionManager {
     private volatile State state = State.IDLE;
     private volatile String detail = "";
 
-    private static final int FAST_SCAN = 64;
-    private static final int FULL_SCAN = 180;
-    private static final int FAST_ATTEMPTS = 10;
-    private static final int FULL_ATTEMPTS = 28;
-    private static final long TCP_CONNECT_TIMEOUT_MS = 9_500L;
-    private static final long UDP_CONNECT_TIMEOUT_MS = 12_500L;
+    private static final int FAST_SCAN = 80;
+    private static final int FULL_SCAN = 320;
+    private static final int FAST_ATTEMPTS = 8;
+    private static final int FULL_ATTEMPTS = 20;
+    private static final long TCP_CONNECT_TIMEOUT_MS = 45_000L;
+    private static final long UDP_CONNECT_TIMEOUT_MS = 28_000L;
 
     public static VpnSessionManager get(Context context) {
         VpnSessionManager local = instance;
@@ -53,6 +55,13 @@ public final class VpnSessionManager {
 
     private VpnSessionManager(Context context) {
         this.context = context;
+        this.sessionDiag = context.getSharedPreferences("session_diag_v1", Context.MODE_PRIVATE);
+        if (sessionDiag.getBoolean("active", false)) {
+            AppLog.w("session", "previous process ended while VPN session was active; lastState="
+                    + sessionDiag.getString("state", "?") + " detail="
+                    + sessionDiag.getString("detail", ""));
+        }
+        sessionDiag.edit().putBoolean("active", false).apply();
         this.tunnel = OpenVpnTunnel.get(context);
         AppLog.i("session", "VpnSessionManager initialized engineHealthy=" + tunnel.engineHealthy());
     }
@@ -84,6 +93,7 @@ public final class VpnSessionManager {
             return;
         }
         long token = generation.incrementAndGet();
+        sessionDiag.edit().putBoolean("active", true).apply();
         setState(State.SEARCHING, "Запуск диагностики…");
         AppLog.i("session", "user session START token=" + token);
         sessionWorker.execute(() -> runSession(token));
@@ -96,6 +106,7 @@ public final class VpnSessionManager {
         setState(State.STOPPING, "Останавливаю OpenVPN…");
         tunnel.disconnect();
         setState(State.IDLE, "");
+        sessionDiag.edit().putBoolean("active", false).apply();
     }
 
     private void runSession(long token) {
@@ -130,7 +141,7 @@ public final class VpnSessionManager {
                                 if (done == total || done == 1 || done % 4 == 0) {
                                     setState(State.SEARCHING,
                                             "Проверено " + done + "/" + total
-                                                    + " • доступно " + accepted
+                                                    + " • кандидатов " + accepted
                                                     + " • мимо " + rejected
                                                     + (phaseIndex == 0 ? " • fast" : " • full"));
                                 }
@@ -235,6 +246,13 @@ public final class VpnSessionManager {
     private void setState(State next, String message) {
         state = next;
         detail = message == null ? "" : message;
+        sessionDiag.edit()
+                .putString("state", next.name())
+                .putString("detail", detail)
+                .putLong("updated", System.currentTimeMillis())
+                .putBoolean("active", next == State.SEARCHING || next == State.CONNECTING
+                        || next == State.CONNECTED || next == State.STOPPING)
+                .apply();
         AppLog.i("state", next + (detail.isEmpty() ? "" : " " + detail.replace('\n', ' ')));
         for (Listener listener : listeners) {
             try { listener.onState(next, detail); }
