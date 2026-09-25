@@ -198,13 +198,16 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
         boolean signaled = false;
         long overallMs = Math.max(15_000L, timeoutMs);
         long overallDeadline = SystemClock.elapsedRealtime() + overallMs;
+        AppLog.i("tunnel", "watchdog relay=" + relay.ip + " overallMs=" + overallMs
+                + " preReplyStallMs=12000 postReplyStallMs=65000");
         try {
             while (!(signaled = attempt.done.await(250L, TimeUnit.MILLISECONDS))) {
                 long now = SystemClock.elapsedRealtime();
                 long idle = now - attempt.lastProgressAt;
-                // Before the server replies we fail quickly. Once TLS/AUTH has started, VPN Gate
-                // can legitimately need well over ten seconds to finish the handshake and PUSH.
-                long stallLimit = attempt.serverReplied ? 22_000L : 12_000L;
+                // Before the server replies we fail quickly. Once TLS/AUTH has started, let the
+                // OpenVPN control-channel handshake breathe. The previous 22s watchdog killed every
+                // tested relay at TLS_CERT_OK before OpenVPN's own handshake window could expire.
+                long stallLimit = attempt.serverReplied ? 65_000L : 12_000L;
                 if (idle >= stallLimit) {
                     attempt.failure = "stalled " + idle + " ms at " + attempt.lastStage;
                     break;
@@ -436,7 +439,9 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
             } else if (line.contains("Initialization Sequence Completed")) {
                 attempt.meaningfulProgress("INIT_COMPLETE", "OpenVPN инициализирован");
             } else if (low.contains("auth_failed") || low.contains("tls error")
-                    || low.contains("connection reset") || low.contains("certificate verify failed")) {
+                    || low.contains("connection reset") || low.contains("certificate verify failed")
+                    || low.contains("failed to negotiate cipher") || low.contains("options error")
+                    || low.contains("tls key negotiation failed") || low.contains("inactivity timeout")) {
                 attempt.meaningfulProgress("ENGINE_ERROR", line);
             }
         } catch (Throwable e) {
@@ -447,16 +452,24 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
     private void applyVpnGateCompatibility(VpnProfile profile) {
         if (profile == null) return;
 
-        // VPN Gate still has many OpenVPN 2.3/2.4-era SoftEther endpoints. ConfigParser preserves
-        // their legacy --cipher in mCipher, but recent ics-openvpn emits that directive only when
-        // compatibility mode is enabled. Without this, TCP can reach VERIFY OK and then never
-        // finish control-channel negotiation with an older peer.
-        if (profile.mCompatMode <= 0) profile.mCompatMode = 20400; // OpenVPN 2.4 compatibility
+        // VPN Gate still has many old SoftEther/OpenVPN peers. OpenVPN 2.6/2.7 needs a
+        // data-cipher fallback when talking to pre-NCP OpenVPN 2.3 peers. compat-mode 2.3.7
+        // enables that fallback while avoiding the <=2.3.6 rule that also lowers TLS minimums.
+        if (profile.mCompatMode <= 0) profile.mCompatMode = 20307;
 
         String cipher = safe(profile.mCipher).trim();
         String dataCiphers = safe(profile.mDataCiphers).trim();
         if (!cipher.isEmpty() && !containsCipher(dataCiphers, cipher)) {
             profile.mDataCiphers = dataCiphers.isEmpty() ? cipher : dataCiphers + ":" + cipher;
+            dataCiphers = profile.mDataCiphers;
+        }
+
+        // BF-CBC is not used by the relays in the current log, but older cached VPN Gate
+        // profiles can still contain it. Only enable OpenSSL's legacy provider when needed.
+        String upperCipher = cipher.toUpperCase(java.util.Locale.US);
+        String upperData = dataCiphers.toUpperCase(java.util.Locale.US);
+        if ("BF-CBC".equals(upperCipher) || upperData.contains("BF-CBC")) {
+            profile.mUseLegacyProvider = true;
         }
 
         // Require a TLS server certificate rather than accepting a generic certificate role.

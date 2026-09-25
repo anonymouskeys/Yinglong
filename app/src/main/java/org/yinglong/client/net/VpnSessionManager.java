@@ -40,8 +40,10 @@ public final class VpnSessionManager {
     private static final int FULL_SCAN = 320;
     private static final int FAST_ATTEMPTS = 8;
     private static final int FULL_ATTEMPTS = 20;
-    private static final long TCP_CONNECT_TIMEOUT_MS = 45_000L;
-    private static final long UDP_CONNECT_TIMEOUT_MS = 28_000L;
+    // OpenVPN's control-channel handshake can legitimately outlive the raw TCP connect.
+    // Give old VPN Gate peers enough time to either finish or emit their own useful TLS/cipher error.
+    private static final long TCP_CONNECT_TIMEOUT_MS = 75_000L;
+    private static final long UDP_CONNECT_TIMEOUT_MS = 45_000L;
 
     public static VpnSessionManager get(Context context) {
         VpnSessionManager local = instance;
@@ -155,7 +157,7 @@ public final class VpnSessionManager {
                     int scan = scanLimits[phase];
                     if (scan <= 0) continue;
                     String phaseName = phase == 0 ? "быстрая" : "расширенная";
-                    setState(State.SEARCHING, "Начинаю " + phaseName + " проверку: 0/" + scan);
+                    setState(State.SEARCHING, "Начинаю " + (phase == 0 ? "быструю" : "расширенную") + " проверку: 0/" + scan);
 
                     final int phaseIndex = phase;
                     List<RelayProbe.Result> ranked = RelayProbe.rank(
