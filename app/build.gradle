@@ -1,5 +1,6 @@
 plugins {
     id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
 }
 
 android {
@@ -10,8 +11,8 @@ android {
         applicationId 'org.yinglong.client'
         minSdk 24
         targetSdk 35
-        versionCode 12
-        versionName '0.3.8'
+        versionCode 13
+        versionName '0.3.9'
     }
 
     buildTypes {
@@ -31,9 +32,14 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
 }
 
 dependencies {
+    implementation project(':SoftEtherClient')
     implementation files("${rootDir}/third_party/icsopenvpn-0.7.55-myst.aar")
     implementation 'androidx.annotation:annotation:1.9.1'
     implementation 'androidx.core:core-ktx:1.13.1'

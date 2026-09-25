@@ -16,3 +16,5 @@ dependencyResolutionManagement {
 
 rootProject.name = 'Yinglong'
 include ':app'
+include ':SoftEtherClient'
+project(':SoftEtherClient').projectDir = file('third_party/SoftEtherClient')

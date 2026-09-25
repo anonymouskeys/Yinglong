@@ -11,7 +11,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
 
     steps:
       - name: Checkout
@@ -39,14 +39,35 @@ jobs:
           echo "1da7a6068d0bda22fef4b8ec7a887c07ab456e65c1246ea9a7533c4676891454  third_party/icsopenvpn-0.7.55-myst.aar" \
             | sha256sum -c -
 
-      - name: Refresh bundled VPN Gate relay seed
+      - name: Fetch pinned SoftEther Android engine
         shell: bash
         run: |
           set -euo pipefail
-          bash scripts/update_seed.sh
-          COUNT="$(grep -Ev '^(\*vpn_servers|\*|#|[[:space:]]*$)' app/src/main/assets/relays_seed.csv | wc -l | tr -d ' ')"
-          echo "Bundled relay profiles: $COUNT"
-          test "$COUNT" -ge 10
+          PIN="fc0140212c0111ed93b95243c4d04711a9a0a019"
+          rm -rf third_party/SoftEtherClient
+          mkdir -p third_party/SoftEtherClient
+          git -C third_party/SoftEtherClient init
+          git -C third_party/SoftEtherClient remote add origin https://github.com/hoang-rio/SoftEther-Android-Module.git
+          git -C third_party/SoftEtherClient fetch --depth 1 origin "$PIN"
+          git -C third_party/SoftEtherClient checkout --detach FETCH_HEAD
+          test "$(git -C third_party/SoftEtherClient rev-parse HEAD)" = "$PIN"
+
+          git -C third_party/SoftEtherClient submodule update --init --depth 1 src/main/cpp/openssl
+
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("third_party/SoftEtherClient/build.gradle")
+          s = p.read_text()
+          s = s.replace(
+              "plugins {\n    id 'com.android.library'\n}",
+              "plugins {\n    id 'com.android.library'\n    id 'org.jetbrains.kotlin.android'\n}"
+          )
+          s = s.replace(
+              "implementation 'androidx.core:core-ktx:1.18.0'",
+              "implementation 'androidx.core:core-ktx:1.13.1'"
+          )
+          p.write_text(s)
+          PY
 
       - name: Build debug APK
         run: gradle --no-daemon :app:assembleDebug
@@ -58,8 +79,8 @@ jobs:
           APK="app/build/outputs/apk/debug/app-debug.apk"
           test -f "$APK"
           unzip -l "$APK" | tee /tmp/apk-list.txt
+          grep -q 'lib/arm64-v8a/libsoftether.so' /tmp/apk-list.txt
           grep -q 'lib/arm64-v8a/libovpnexec.so' /tmp/apk-list.txt
-          grep -q 'lib/armeabi-v7a/libovpnexec.so' /tmp/apk-list.txt
 
           MANIFEST="$(find app/build/intermediates -type f -name AndroidManifest.xml | grep -E 'merged_manifest|merged_manifests' | head -n 1 || true)"
           if [ -z "$MANIFEST" ]; then
@@ -67,10 +88,10 @@ jobs:
             exit 1
           fi
           echo "Checking merged manifest: $MANIFEST"
-          grep -q 'de.blinkt.openvpn.core.OpenVPNService' "$MANIFEST"
-          grep -q 'android.permission.FOREGROUND_SERVICE_SPECIAL_USE' "$MANIFEST"
+          grep -q 'vn.unlimit.softether.SoftEtherVpnService' "$MANIFEST"
           grep -q 'android.permission.BIND_VPN_SERVICE' "$MANIFEST"
-          echo "VPN engine packaging checks passed"
+          grep -q 'android.permission.FOREGROUND_SERVICE_SPECIAL_USE' "$MANIFEST"
+          echo "SoftEther VPN engine packaging checks passed"
 
       - name: Prepare artifact
         shell: bash

@@ -5,10 +5,8 @@ import android.content.SharedPreferences;
 
 import org.yinglong.client.catalog.Relay;
 import org.yinglong.client.catalog.RelayStore;
-import org.yinglong.client.catalog.RelayUpdater;
 import org.yinglong.client.diag.AppLog;
 
-import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -18,18 +16,21 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
-/** User-scoped VPN session: fast probe -> connect -> extended probe -> maintain -> fail over. */
+/**
+ * Yinglong v0.3.9: local catalogue -> SoftEther TCP probe -> native SoftEther TLS -> DHCP -> VpnService.
+ * No catalogue refresh happens on START.
+ */
 public final class VpnSessionManager {
     public enum State { IDLE, SEARCHING, CONNECTING, CONNECTED, STOPPING, ERROR }
 
     public interface Listener { void onState(State state, String detail); }
 
     private static volatile VpnSessionManager instance;
+
     private final Context context;
-    private final OpenVpnTunnel tunnel;
+    private final SoftEtherTunnel tunnel;
     private final SharedPreferences sessionDiag;
     private final ExecutorService sessionWorker = Executors.newSingleThreadExecutor();
-    private final ExecutorService maintenanceWorker = Executors.newSingleThreadExecutor();
     private final CopyOnWriteArrayList<Listener> listeners = new CopyOnWriteArrayList<>();
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicLong generation = new AtomicLong(0L);
@@ -37,16 +38,10 @@ public final class VpnSessionManager {
     private volatile State state = State.IDLE;
     private volatile String detail = "";
 
-    private static final int FAST_SCAN = 80;
-    private static final int FULL_SCAN = 320;
-    private static final int FAST_ATTEMPTS = 8;
-    private static final int FULL_ATTEMPTS = 20;
-    // OpenVPN's control-channel handshake can legitimately outlive the raw TCP connect.
-    // Give old VPN Gate peers enough time to either finish or emit their own useful TLS/cipher error.
-    private static final long TCP_CONNECT_TIMEOUT_MS = 70_000L;
-    // Dead UDP is still cut after ~5.5s by OpenVpnTunnel. This larger window
-    // applies only once a server has actually replied and TLS is progressing.
-    private static final long UDP_CONNECT_TIMEOUT_MS = 90_000L;
+    private static final int FAST_SCAN_HOSTS = 120;
+    private static final int FAST_ATTEMPTS = 10;
+    private static final int FULL_ATTEMPTS = 18;
+    private static final long SOFTETHER_ATTEMPT_TIMEOUT_MS = 24_000L;
 
     public static VpnSessionManager get(Context context) {
         VpnSessionManager local = instance;
@@ -68,8 +63,8 @@ public final class VpnSessionManager {
                     + sessionDiag.getString("detail", ""));
         }
         sessionDiag.edit().putBoolean("active", false).apply();
-        this.tunnel = OpenVpnTunnel.get(context);
-        AppLog.i("session", "VpnSessionManager initialized engineHealthy=" + tunnel.engineHealthy());
+        this.tunnel = SoftEtherTunnel.get(context);
+        AppLog.i("session", "VpnSessionManager initialized SoftEther healthy=" + tunnel.engineHealthy());
     }
 
     public State state() { return state; }
@@ -85,9 +80,11 @@ public final class VpnSessionManager {
     public void removeListener(Listener listener) { listeners.remove(listener); }
 
     public void start() {
-        AppLog.i("session", "start() called running=" + running.get() + " permission=" + tunnel.isPermissionGranted());
+        AppLog.i("session", "start() called running=" + running.get()
+                + " permission=" + tunnel.isPermissionGranted());
+
         if (!tunnel.engineHealthy()) {
-            setState(State.ERROR, "OpenVPN engine self-check failed");
+            setState(State.ERROR, "SoftEther engine self-check failed");
             return;
         }
         if (!tunnel.isPermissionGranted()) {
@@ -98,10 +95,11 @@ public final class VpnSessionManager {
             AppLog.w("session", "start ignored: session already running");
             return;
         }
+
         long token = generation.incrementAndGet();
         sessionDiag.edit().putBoolean("active", true).apply();
-        setState(State.SEARCHING, "Запуск диагностики…");
-        AppLog.i("session", "user session START token=" + token);
+        setState(State.SEARCHING, "SoftEther TLS: читаю локальную базу…");
+        AppLog.i("session", "user session START token=" + token + " transport=SoftEther-TLS");
         sessionWorker.execute(() -> runSession(token));
     }
 
@@ -109,198 +107,128 @@ public final class VpnSessionManager {
         AppLog.i("session", "stop() called state=" + state + " running=" + running.get());
         if (!running.getAndSet(false) && state == State.IDLE) return;
         generation.incrementAndGet();
-        setState(State.STOPPING, "Останавливаю OpenVPN…");
+        setState(State.STOPPING, "Останавливаю SoftEther…");
         tunnel.disconnect();
         setState(State.IDLE, "");
         sessionDiag.edit().putBoolean("active", false).apply();
     }
 
     private void runSession(long token) {
-        boolean maintenanceStarted = false;
         String lastFailure = "";
-        List<Relay> bootstrapRelays = null;
         try {
-            if (active(token)) {
-                setState(State.SEARCHING, "Обновляю свежий список VPN Gate…");
-                try {
-                    bootstrapRelays = new RelayUpdater(context).bootstrapFresh();
-                    AppLog.i("session", "bootstrap fresh relay pool=" + bootstrapRelays.size());
-                    setState(State.SEARCHING, "Свежий список получен: " + bootstrapRelays.size() + " relay");
-                } catch (Throwable e) {
-                    AppLog.w("session", "bootstrap refresh unavailable; using local fallback: "
-                            + e.getClass().getSimpleName() + ": " + safe(e.getMessage()));
-                    setState(State.SEARCHING, "Свежий список недоступен — использую локальный резерв");
-                }
-            }
-
             while (active(token)) {
-                List<Relay> relays;
-                if (bootstrapRelays != null && !bootstrapRelays.isEmpty()) {
-                    relays = bootstrapRelays;
-                    bootstrapRelays = null;
-                    AppLog.i("session", "using fresh bootstrap pool size=" + relays.size());
-                } else {
-                    relays = new RelayStore(context).read();
-                    AppLog.i("session", "using persistent fallback pool size=" + relays.size());
-                }
-                AppLog.i("session", "relay pool size=" + relays.size());
+                List<Relay> relays = new RelayStore(context).read();
+                AppLog.i("session", "local relay pool size=" + relays.size()
+                        + " (catalog refresh disabled on START)");
                 if (relays.isEmpty()) throw new IllegalStateException("локальный пул relay пуст");
 
                 Set<String> tried = new HashSet<>();
-                // The current network can establish TCP and verify the server certificate, then
-                // drops the rest of the OpenVPN control-channel exchange. Probe UDP first so we
-                // do not burn minutes on endpoints that DPI lets half-open.
-                boolean preferUdp = true;
-                boolean tcpTlsFiltered = false;
-                int udpMtuRescues = 0;
                 boolean connectedThisRound = false;
                 Relay connectedRelay = null;
+                int connectedPort = 0;
 
-                int[] scanLimits = {Math.min(FAST_SCAN, relays.size()), Math.min(FULL_SCAN, relays.size())};
+                int[] hostLimits = {Math.min(FAST_SCAN_HOSTS, relays.size()), relays.size()};
                 int[] attemptLimits = {FAST_ATTEMPTS, FULL_ATTEMPTS};
-                int[] probeTimeouts = {900, 1450};
+                int[] probeTimeouts = {850, 1300};
 
                 phaseLoop:
-                for (int phase = 0; phase < scanLimits.length && active(token); phase++) {
-                    int scan = scanLimits[phase];
-                    if (scan <= 0) continue;
-                    String phaseName = phase == 0 ? "быстрая" : "расширенная";
-                    setState(State.SEARCHING, "Начинаю " + (phase == 0 ? "быструю" : "расширенную") + " проверку: 0/" + scan);
+                for (int phase = 0; phase < hostLimits.length && active(token); phase++) {
+                    int hostLimit = hostLimits[phase];
+                    if (hostLimit <= 0) continue;
+
+                    String phaseName = phase == 0 ? "быстрая" : "полная";
+                    setState(State.SEARCHING,
+                            "SoftEther TLS: " + phaseName + " проверка 443/992/5555 • 0/" + hostLimit);
 
                     final int phaseIndex = phase;
-                    List<RelayProbe.Result> ranked = RelayProbe.rank(
-                            relays, scan, phase == 0 ? 18 : 16, probeTimeouts[phase],
-                            (done, total, accepted, rejected) -> {
+                    List<SoftEtherProbe.Result> ranked = SoftEtherProbe.rank(
+                            relays,
+                            hostLimit,
+                            phase == 0 ? 24 : 20,
+                            probeTimeouts[phase],
+                            (done, total, accepted) -> {
                                 if (!active(token)) return;
-                                if (done == total || done == 1 || done % 4 == 0) {
+                                if (done == total || done == 1 || done % 5 == 0) {
                                     setState(State.SEARCHING,
-                                            "Проверено " + done + "/" + total
-                                                    + " • кандидатов " + accepted
-                                                    + " • мимо " + rejected
+                                            "SoftEther TLS: проверено " + done + "/" + total
+                                                    + " • открытых endpoint " + accepted
                                                     + (phaseIndex == 0 ? " • fast" : " • full"));
                                 }
                             });
 
                     if (ranked.isEmpty()) {
-                        AppLog.w("session", phaseName + " scan produced no reachable/rankable relays");
+                        AppLog.w("session", phaseName + " SoftEther scan found no TCP listeners");
                         continue;
                     }
-                    AppLog.i("session", phaseName + " ranked candidates=" + ranked.size());
-                    ranked = orderCandidates(ranked, preferUdp);
-                    AppLog.i("session", "transport order=" + (preferUdp ? "UDP-first interleaved" : "TCP-first"));
 
+                    AppLog.i("session", phaseName + " SoftEther candidates=" + ranked.size());
                     int attempted = 0;
-                    for (RelayProbe.Result result : ranked) {
+
+                    for (SoftEtherProbe.Result result : ranked) {
                         if (!active(token)) return;
                         if (result == null || result.relay == null) continue;
+
                         Relay relay = result.relay;
-                        if (tcpTlsFiltered && result.tcp) {
-                            AppLog.i("session", "skip TCP after post-certificate TLS filtering relay=" + relay.ip);
-                            continue;
-                        }
-                        if (!tried.add(OpenVpnProfileUtil.endpointKey(relay))) continue;
+                        String key = relay.ip + ":" + result.port;
+                        if (!tried.add(key)) continue;
                         if (attempted >= attemptLimits[phase]) break;
                         attempted++;
 
-                        String transport = result.tcp ? "tcp:" + result.port : "udp:" + result.port;
-                        String base = "Попытка " + attempted + "/" + attemptLimits[phase]
+                        String base = "SoftEther " + attempted + "/" + attemptLimits[phase]
                                 + " • " + safe(relay.countryShort) + " " + relay.ip
-                                + " • " + transport;
+                                + " • tls:" + result.port;
                         setState(State.CONNECTING, base);
                         AppLog.i("session", base);
 
-                        long connectTimeout = result.tcp ? TCP_CONNECT_TIMEOUT_MS : UDP_CONNECT_TIMEOUT_MS;
                         boolean ok;
                         try {
-                            ok = tunnel.connectBlocking(relay, connectTimeout, (stage, message) -> {
-                                if (!active(token)) return;
-                                String m = message == null || message.isEmpty() ? "" : " • " + message;
-                                setState(State.CONNECTING, base + "\n" + stage + m);
-                            });
+                            ok = tunnel.connectBlocking(
+                                    relay,
+                                    result.port,
+                                    SOFTETHER_ATTEMPT_TIMEOUT_MS,
+                                    (stage, message) -> {
+                                        if (!active(token)) return;
+                                        String m = message == null || message.isEmpty() ? "" : " • " + message;
+                                        setState(State.CONNECTING, base + "\n" + stage + m);
+                                    });
                         } catch (Throwable e) {
                             lastFailure = e.getClass().getSimpleName() + ": " + safe(e.getMessage());
-                            AppLog.e("session", "attempt exception relay=" + relay.ip, e);
+                            AppLog.e("session", "SoftEther attempt exception relay=" + relay.ip
+                                    + " port=" + result.port, e);
                             ok = false;
                         }
 
                         if (!ok) {
                             if (!tunnel.lastFailure().isEmpty()) lastFailure = tunnel.lastFailure();
-
-                            // X-dns AUTO-inspired cascade: a UDP endpoint that actually replied
-                            // gets one alternate transport strategy instead of being discarded.
-                            if (!result.tcp && tunnel.lastAttemptServerReplied()
-                                    && udpMtuRescues < 3 && active(token)) {
-                                udpMtuRescues++;
-                                String rescueBase = base + "\nMTU_RESCUE "
-                                        + udpMtuRescues + "/3 • max-packet-size 1000";
-                                AppLog.w("session", "UDP relay replied but handshake did not finish; "
-                                        + "retrying with MTU rescue relay=" + relay.ip);
-                                setState(State.CONNECTING, rescueBase);
-                                try {
-                                    ok = tunnel.connectBlocking(relay, UDP_CONNECT_TIMEOUT_MS, (stage, message) -> {
-                                        if (!active(token)) return;
-                                        String m = message == null || message.isEmpty() ? "" : " • " + message;
-                                        setState(State.CONNECTING, rescueBase + "\n" + stage + m);
-                                    }, true);
-                                } catch (Throwable e) {
-                                    lastFailure = e.getClass().getSimpleName() + ": " + safe(e.getMessage());
-                                    AppLog.e("session", "MTU rescue exception relay=" + relay.ip, e);
-                                    ok = false;
-                                }
-                                if (!ok && !tunnel.lastFailure().isEmpty()) {
-                                    lastFailure = tunnel.lastFailure();
-                                }
-                            }
-
-                            if (!ok && result.tcp && looksLikePostCertificateTlsBlock(lastFailure)) {
-                                tcpTlsFiltered = true;
-                                preferUdp = true;
-                                AppLog.w("session", "TCP control channel looks filtered after TLS certificate; "
-                                        + "remaining TCP candidates will be skipped this round");
-                                setState(State.SEARCHING, "TCP после сертификата блокируется — переключаюсь на UDP");
-                            }
-                            if (!ok) {
-                                AppLog.w("session", "attempt failed relay=" + relay.ip + " reason=" + lastFailure);
-                                continue;
-                            }
+                            AppLog.w("session", "SoftEther attempt failed relay=" + relay.ip
+                                    + " port=" + result.port + " reason=" + lastFailure);
+                            continue;
                         }
 
                         connectedThisRound = true;
                         connectedRelay = relay;
+                        connectedPort = result.port;
                         break phaseLoop;
                     }
                 }
 
                 if (!connectedThisRound || connectedRelay == null) {
-                    throw new IllegalStateException("не удалось подключиться; последняя причина: "
-                            + (lastFailure.isEmpty() ? "нет ответа OpenVPN" : lastFailure));
+                    throw new IllegalStateException("SoftEther не подключился; последняя причина: "
+                            + (lastFailure.isEmpty() ? "нет подходящего TLS relay" : lastFailure));
                 }
 
                 final Relay sessionRelay = connectedRelay;
-                setState(State.CONNECTED, safe(sessionRelay.countryShort) + " " + sessionRelay.ip);
-                AppLog.i("session", "session CONNECTED relay=" + sessionRelay.ip);
+                setState(State.CONNECTED,
+                        safe(sessionRelay.countryShort) + " " + sessionRelay.ip
+                                + " • SoftEther TLS:" + connectedPort);
+                AppLog.i("session", "session CONNECTED SoftEther relay="
+                        + sessionRelay.ip + " port=" + connectedPort);
 
-                if (!maintenanceStarted) {
-                    maintenanceStarted = true;
-                    maintenanceWorker.execute(() -> {
-                        if (!active(token)) return;
-                        AppLog.i("maintenance", "post-connect relay maintenance started");
-                        try {
-                            new PostConnectMaintenance(context).runOnce();
-                            int size = new RelayStore(context).read().size();
-                            AppLog.i("maintenance", "post-connect relay maintenance finished; pool=" + size);
-                        } catch (Throwable e) {
-                            AppLog.e("maintenance", "post-connect relay maintenance failed", e);
-                        }
-                    });
-                }
-
-                try { tunnel.awaitConnectionLoss(); }
-                catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
+                tunnel.awaitConnectionLoss();
 
                 if (!active(token)) return;
-                AppLog.w("session", "tunnel lost; automatic failover begins");
-                setState(State.SEARCHING, "Туннель потерян. Перебираю relay заново…");
+                AppLog.w("session", "SoftEther tunnel lost; automatic failover begins");
+                setState(State.SEARCHING, "SoftEther туннель потерян. Ищу другой relay…");
             }
         } catch (Throwable e) {
             AppLog.e("session", "session failed", e);
@@ -313,35 +241,9 @@ public final class VpnSessionManager {
             }
         } finally {
             if (generation.get() == token && !running.get() && state != State.ERROR) setState(State.IDLE, "");
-            AppLog.i("session", "runSession exit token=" + token + " state=" + state + " running=" + running.get());
+            AppLog.i("session", "runSession exit token=" + token
+                    + " state=" + state + " running=" + running.get());
         }
-    }
-
-    private static List<RelayProbe.Result> orderCandidates(List<RelayProbe.Result> ranked, boolean preferUdp) {
-        if (!preferUdp || ranked == null || ranked.size() < 2) return ranked;
-
-        List<RelayProbe.Result> udp = new ArrayList<>();
-        List<RelayProbe.Result> tcp = new ArrayList<>();
-        for (RelayProbe.Result r : ranked) {
-            if (r == null) continue;
-            if (r.tcp) tcp.add(r); else udp.add(r);
-        }
-
-        // Three quick UDP attempts, then one known-live TCP candidate.
-        List<RelayProbe.Result> out = new ArrayList<>(ranked.size());
-        int u = 0, t = 0;
-        while (u < udp.size() || t < tcp.size()) {
-            for (int burst = 0; burst < 3 && u < udp.size(); burst++) out.add(udp.get(u++));
-            if (t < tcp.size()) out.add(tcp.get(t++));
-        }
-        return out;
-    }
-
-    private static boolean looksLikePostCertificateTlsBlock(String failure) {
-        String f = safe(failure).toLowerCase(java.util.Locale.US);
-        return f.contains("tls key negotiation failed")
-                || f.contains("tls handshake failed")
-                || f.contains("fatal tls error");
     }
 
     private boolean active(long token) { return running.get() && generation.get() == token; }
@@ -363,5 +265,5 @@ public final class VpnSessionManager {
         }
     }
 
-    private static String safe(String v) { return v == null ? "" : v; }
+    private static String safe(String value) { return value == null ? "" : value; }
 }
