@@ -1,6 +1,7 @@
 package org.yinglong.client;
 
 import android.app.Application;
+import android.os.Build;
 
 import org.yinglong.client.catalog.RelayStore;
 import org.yinglong.client.diag.AppLog;
@@ -10,14 +11,20 @@ public final class YinglongApp extends Application {
     @Override public void onCreate() {
         super.onCreate();
         AppLog.init(this);
-        AppLog.i("app", "Yinglong process started v0.3");
+        AppLog.installCrashHandler(this);
+        AppLog.i("app", "Yinglong process started v0.3.1 sdk=" + Build.VERSION.SDK_INT
+                + " device=" + Build.MANUFACTURER + " " + Build.MODEL);
         try {
             new RelayStore(this).ensureSeeded();
-            AppLog.i("catalog", "relay seed ready");
-        } catch (Exception e) {
+            AppLog.i("catalog", "relay seed ready; count=" + new RelayStore(this).read().size());
+        } catch (Throwable e) {
             AppLog.e("catalog", "failed to seed relay catalogue", e);
         }
-        // Initializes the embedded OpenVPN engine/listeners, but does not connect or refresh anything.
-        VpnSessionManager.get(this);
+        try {
+            VpnSessionManager.get(this);
+            AppLog.i("app", "VPN manager initialized");
+        } catch (Throwable t) {
+            AppLog.e("app", "VPN manager initialization FAILED", t);
+        }
     }
 }

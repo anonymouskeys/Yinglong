@@ -42,6 +42,27 @@ jobs:
       - name: Build debug APK
         run: gradle --no-daemon :app:assembleDebug
 
+      - name: Verify VPN engine packaging
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          test -f "$APK"
+          unzip -l "$APK" | tee /tmp/apk-list.txt
+          grep -q 'lib/arm64-v8a/libovpnexec.so' /tmp/apk-list.txt
+          grep -q 'lib/armeabi-v7a/libovpnexec.so' /tmp/apk-list.txt
+
+          MANIFEST="$(find app/build/intermediates -type f -name AndroidManifest.xml | grep -E 'merged_manifest|merged_manifests' | head -n 1 || true)"
+          if [ -z "$MANIFEST" ]; then
+            echo "Merged manifest not found" >&2
+            exit 1
+          fi
+          echo "Checking merged manifest: $MANIFEST"
+          grep -q 'de.blinkt.openvpn.core.OpenVPNService' "$MANIFEST"
+          grep -q 'android.permission.FOREGROUND_SERVICE_SPECIAL_USE' "$MANIFEST"
+          grep -q 'android.permission.BIND_VPN_SERVICE' "$MANIFEST"
+          echo "VPN engine packaging checks passed"
+
       - name: Prepare artifact
         shell: bash
         run: |
