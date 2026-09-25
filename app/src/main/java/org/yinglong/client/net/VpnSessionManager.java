@@ -324,8 +324,7 @@ public final class VpnSessionManager {
                                                     : " • " + message;
 
                                             setState(State.CONNECTING,
-                                                    base + "
-" + stage + extra);
+                                                    base + "\n" + stage + extra);
                                         });
                             } catch (Throwable e) {
                                 ok = false;
