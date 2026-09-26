@@ -98,7 +98,7 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
             AppLog.i(
                 "se-auth",
                 "auth attempt ${index + 1}/${variants.size} mode=${variant.label} " +
-                    "hub=vpngate user=vpn relay=${relay.ip} port=$port"
+                    "hub=VPNGATE user=vpn relay=${relay.ip} port=$port"
             )
 
             if (connectVariant(relay, port, perVariantTimeout, variant, progress)) {
@@ -156,7 +156,7 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
             serverPort = port,
             username = "vpn",
             password = variant.password,
-            virtualHub = "vpngate",
+            virtualHub = "VPNGATE",
             authMethod = variant.method,
             sessionName = "Yinglong ${relay.countryShort} ${relay.ip}",
             localAddress = "10.21.0.2",
@@ -173,8 +173,8 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
             connectTimeoutMs = 8_000,
             country = relay.countryShort ?: "",
             clientProductName = "Yinglong",
-            clientVersion = "0.9.5",
-            clientBuild = 33,
+            clientVersion = "1.0.0",
+            clientBuild = 34,
             fullDuplex = true
         )
 
@@ -187,7 +187,7 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
         AppLog.i(
             "se-tunnel",
             "START SoftEther relay=${relay.ip} port=$port auth=${variant.label} " +
-                "hub=vpngate password=$passwordState"
+                "hub=VPNGATE password=$passwordState"
         )
         attempt.stage(
             "ENGINE_START",

@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Yinglong v0.9.5 VPN Gate session:
+ * Yinglong v1.0.0 official SoftEther VPN Gate session:
  * native SoftEther first, official VPN Gate OpenVPN profile as fallback.
  */
 public final class VpnSessionManager {
@@ -193,42 +193,30 @@ public final class VpnSessionManager {
                 String connectedTransport = "";
                 int connectedPort = 0;
 
-                // 1) Try only a couple of different SoftEther hosts.
+                // 1) Official SoftEther v4.44-9807 first.
+                //
+                // Do NOT pre-probe guessed SoftEther ports. The official
+                // ClientConnectGetSocket/TcpIpConnectEx path performs direct
+                // TCP and the official NAT-T/R-UDP fallback itself.
                 if (softEther.engineHealthy() && SOFTETHER_MAX_RELAY_ATTEMPTS > 0) {
-                    setState(State.SEARCHING, "SoftEther: ищу живые нативные endpoint…");
+                    setState(State.SEARCHING,
+                            "Official SoftEther: Cedar/Mayaqua • выбираю VPN Gate relay…");
 
-                    List<SoftEtherProbe.Result> softCandidates = SoftEtherProbe.rank(
-                            relays,
-                            relays.size(),
-                            24,
-                            1000,
-                            (done, total, accepted) -> {
-                                if (!active(token)) return;
-                                if (done == total || done == 1 || done % 10 == 0) {
-                                    setState(State.SEARCHING,
-                                            "SoftEther: " + done + "/" + total
-                                                    + " • открытых " + accepted);
-                                }
-                            });
+                    List<Relay> softRelays = new ArrayList<>(relays);
+                    softRelays.sort((a, b) -> Long.compare(b.score, a.score));
 
-                    Set<String> triedSoftEndpoints = new HashSet<>();
                     int softAttempt = 0;
-
-                    for (SoftEtherProbe.Result result : softCandidates) {
+                    for (Relay relay : softRelays) {
                         if (!active(token)) return;
-                        if (result == null || result.relay == null) continue;
-
-                        Relay relay = result.relay;
-
-                        String softKey = relay.ip + ":" + result.port;
-                        if (!triedSoftEndpoints.add(softKey)) continue;
+                        if (relay == null || relay.ip == null || relay.ip.isEmpty()) continue;
                         if (softAttempt >= SOFTETHER_MAX_RELAY_ATTEMPTS) break;
                         softAttempt++;
 
-                        final String base = "SoftEther " + softAttempt + "/"
+                        final int directPort = 443;
+                        final String base = "Official SoftEther " + softAttempt + "/"
                                 + SOFTETHER_MAX_RELAY_ATTEMPTS
                                 + " • " + safe(relay.countryShort) + " " + relay.ip
-                                + " • tls:" + result.port;
+                                + " • Cedar TCP→NAT-T";
 
                         setState(State.CONNECTING, base);
                         AppLog.i("session", base);
@@ -237,7 +225,7 @@ public final class VpnSessionManager {
                         try {
                             ok = softEther.connectBlocking(
                                     relay,
-                                    result.port,
+                                    directPort,
                                     SOFTETHER_ATTEMPT_TIMEOUT_MS,
                                     (stage, message) -> {
                                         if (!active(token)) return;
@@ -250,15 +238,13 @@ public final class VpnSessionManager {
                             lastFailure = e.getClass().getSimpleName()
                                     + ": " + safe(e.getMessage());
                             AppLog.e("session",
-                                    "SoftEther attempt exception relay=" + relay.ip
-                                            + " port=" + result.port,
-                                    e);
+                                    "Official SoftEther exception relay=" + relay.ip, e);
                         }
 
                         if (ok) {
                             connectedRelay = relay;
-                            connectedTransport = "SoftEther TLS";
-                            connectedPort = result.port;
+                            connectedTransport = "Official SoftEther v4.44-9807";
+                            connectedPort = directPort;
                             break;
                         }
 
@@ -266,9 +252,8 @@ public final class VpnSessionManager {
                             lastFailure = softEther.lastFailure();
                         }
 
-                        AppLog.w("session", "SoftEther attempt failed relay="
-                                + relay.ip + " port=" + result.port
-                                + " reason=" + lastFailure);
+                        AppLog.w("session", "Official SoftEther failed relay="
+                                + relay.ip + " reason=" + lastFailure);
                     }
                 }
 

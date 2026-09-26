@@ -39,46 +39,61 @@ jobs:
           echo "1da7a6068d0bda22fef4b8ec7a887c07ab456e65c1246ea9a7533c4676891454  third_party/icsopenvpn-0.7.55-myst.aar" \
             | sha256sum -c -
 
-      - name: Fetch pinned SoftEther Android engine
+      - name: Fetch Android shell + exact official SoftEther core
         shell: bash
         run: |
           set -euo pipefail
-          PIN="fc0140212c0111ed93b95243c4d04711a9a0a019"
-          rm -rf third_party/SoftEtherClient
-          mkdir -p third_party/SoftEtherClient
-          git -C third_party/SoftEtherClient init
-          git -C third_party/SoftEtherClient remote add origin https://github.com/hoang-rio/SoftEther-Android-Module.git
-          git -C third_party/SoftEtherClient fetch --depth 1 origin "$PIN"
-          git -C third_party/SoftEtherClient checkout --detach FETCH_HEAD
-          test "$(git -C third_party/SoftEtherClient rev-parse HEAD)" = "$PIN"
 
+          rm -rf third_party/SoftEtherClient
+          git clone --filter=blob:none https://github.com/hoang-rio/SoftEther-Android-Module.git third_party/SoftEtherClient
+          git -C third_party/SoftEtherClient checkout --detach fc0140212c0111ed93b95243c4d04711a9a0a019
+          test "$(git -C third_party/SoftEtherClient rev-parse HEAD)" = "fc0140212c0111ed93b95243c4d04711a9a0a019"
           git -C third_party/SoftEtherClient submodule update --init --depth 1 src/main/cpp/openssl
 
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path("third_party/SoftEtherClient/build.gradle")
-          s = p.read_text()
-          s = s.replace(
-              "plugins {\n    id 'com.android.library'\n}",
-              "plugins {\n    id 'com.android.library'\n    id 'org.jetbrains.kotlin.android'\n}"
-          )
-          s = s.replace(
-              "implementation 'androidx.core:core-ktx:1.18.0'",
-              "implementation 'androidx.core:core-ktx:1.13.1'"
-          )
-          p.write_text(s)
-          PY
+          rm -rf third_party/SoftEtherClient/src/main/cpp/official
+          mkdir -p third_party/SoftEtherClient/src/main/cpp/official
+          git clone --filter=blob:none https://github.com/SoftEtherVPN/SoftEtherVPN_Stable.git \
+            third_party/SoftEtherClient/src/main/cpp/official/SoftEtherVPN
+          git -C third_party/SoftEtherClient/src/main/cpp/official/SoftEtherVPN \
+            checkout --detach ed17437af9719ac66acab30faa29e375d613c35f
+          test "$(git -C third_party/SoftEtherClient/src/main/cpp/official/SoftEtherVPN rev-parse HEAD)" \
+            = "ed17437af9719ac66acab30faa29e375d613c35f"
 
-      - name: Patch SoftEther native core for Android
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/patch_softether_module.py third_party/SoftEtherClient
-          grep -q 'ssl_write_all_control' third_party/SoftEtherClient/src/main/cpp/softether-core/src/proto/softether_protocol.c
-          grep -q 'conn->forced_auth_type = -1' third_party/SoftEtherClient/src/main/cpp/softether-core/src/proto/softether_protocol.c
-          grep -q 'ssl_connect_timeout' third_party/SoftEtherClient/src/main/cpp/softether-core/src/crypto/aes_wrapper.c
-          grep -q 'source=native-softether-only' app/src/main/java/org/yinglong/client/net/SoftEtherProbe.java
-          ! grep -q 'OpenVpnProfileUtil.endpoint' app/src/main/java/org/yinglong/client/net/SoftEtherProbe.java
+          rm -rf /tmp/softether-android-buildref
+          git clone --filter=blob:none https://github.com/ameerhassan/softethervpn-android.git \
+            /tmp/softether-android-buildref
+          git -C /tmp/softether-android-buildref checkout --detach \
+            33044e4e21d24febf086774a89a79ce7914b76f1
+
+          CPP=third_party/SoftEtherClient/src/main/cpp
+          REF=/tmp/softether-android-buildref/app/src/main/cpp
+          rm -rf "$CPP/iconv" "$CPP/ncurses" "$CPP/readline" "$CPP/include"
+          cp -a "$REF/iconv" "$CPP/iconv"
+          cp -a "$REF/ncurses" "$CPP/ncurses"
+          cp -a "$REF/readline" "$CPP/readline"
+          cp -a "$REF/include" "$CPP/include"
+          cp "$REF/tools.cmake" "$CPP/tools.cmake"
+          cp "$REF/iconv.cmake" "$CPP/iconv.cmake"
+          cp "$REF/ncurses.cmake" "$CPP/ncurses.cmake"
+          cp "$REF/readline.cmake" "$CPP/readline.cmake"
+
+          mkdir -p "$CPP/official_android"
+          cp official_softether/CMakeLists.txt "$CPP/CMakeLists.txt"
+          cp official_softether/android_official_jni.c \
+            "$CPP/official_android/android_official_jni.c"
+
+          python3 official_softether/patch_official_android.py \
+            "$CPP/official/SoftEtherVPN"
+          python3 official_softether/patch_android_shell.py \
+            third_party/SoftEtherClient
+
+          test -z "$(git -C "$CPP/official/SoftEtherVPN" diff --name-only -- \
+            src/Cedar/Protocol.c src/Cedar/Connection.c src/Cedar/Session.c \
+            src/Mayaqua/Network.c src/Mayaqua/Encrypt.c src/Mayaqua/Pack.c)"
+
+          ! grep -q 'softether-core/src/proto' "$CPP/CMakeLists.txt"
+          grep -q 'cedar_official' "$CPP/CMakeLists.txt"
+          grep -q 'NewClientSession' "$CPP/official_android/android_official_jni.c"
 
       - name: Fetch pinned MS-SSTP Android engine
         shell: bash
