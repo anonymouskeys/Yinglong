@@ -120,12 +120,16 @@ jobs:
           python3 official_softether/patch_official_android.py \
             "$CPP/official/SoftEtherVPN"
 
-          grep -q 'static void signal_received_for_ignore' \
-            "$CPP/official/SoftEtherVPN/src/Mayaqua/Unix.c"
-          ! grep -q 'static void \*signal_received_for_ignore' \
-            "$CPP/official/SoftEtherVPN/src/Mayaqua/Unix.c"
-          grep -q 'sa.sa_sigaction = &signal_received_for_ignore;' \
-            "$CPP/official/SoftEtherVPN/src/Mayaqua/Unix.c"
+          python3 - <<'PYSIGCHECK'
+          import re
+          from pathlib import Path
+          p = Path("third_party/SoftEtherClient/src/main/cpp/official/SoftEtherVPN/src/Mayaqua/Unix.c")
+          s = p.read_text()
+          assert re.search(r"static\s+void\s+signal_received_for_ignore\s*\(", s)
+          assert not re.search(r"static\s+void\s*\*\s*signal_received_for_ignore\s*\(", s)
+          assert re.search(r"sa\.sa_sigaction\s*=\s*&\s*signal_received_for_ignore\s*;", s)
+          print("NDK27 sigaction source check: OK")
+          PYSIGCHECK
 
           python3 official_softether/patch_android_shell.py \
             third_party/SoftEtherClient

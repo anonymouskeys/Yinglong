@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -23,69 +24,99 @@ protected = [
     "src/Mayaqua/Pack.c",
 ]
 before = {
-    p: subprocess.check_output(
-        ["git", "-C", str(root), "hash-object", p], text=True
+    rel: subprocess.check_output(
+        ["git", "-C", str(root), "hash-object", rel], text=True
     ).strip()
-    for p in protected
+    for rel in protected
 }
 
-# Android app processes cannot rely on writable /tmp. In Mayaqua minimal mode
-# this self-test is unnecessary. This is an OS-layer adaptation only.
+# ----------------------------------------------------------------------
+# Android Mayaqua adaptation 1: no /tmp self-test in minimal mode.
+# ----------------------------------------------------------------------
 p = root / "src/Mayaqua/Mayaqua.c"
 s = p.read_text(errors="surrogateescape")
 old = "\tCheckUnixTempDir();"
-new = '''#ifdef __ANDROID__
+new = """#ifdef __ANDROID__
 \tif (MayaquaIsMinimalMode() == false)
 \t{
 \t\tCheckUnixTempDir();
 \t}
 #else
 \tCheckUnixTempDir();
-#endif'''
+#endif"""
 if new not in s:
-    if old not in s:
-        raise SystemExit("Mayaqua CheckUnixTempDir anchor not found")
+    count = s.count(old)
+    if count != 1:
+        raise SystemExit(f"Mayaqua CheckUnixTempDir: expected 1 anchor, got {count}")
     s = s.replace(old, new, 1)
     p.write_text(s, errors="surrogateescape")
 
-# Stable 4.44 declares this POSIX sigaction callback as returning void*.
-# Android NDK 27 / Clang requires the POSIX type:
-#     void (*)(int, siginfo_t *, void *)
-# Current upstream SoftEtherVPN already fixed this exact function. Backport
-# only that OS-portability fix; protocol/session/transport files stay pinned.
+# ----------------------------------------------------------------------
+# Android Mayaqua adaptation 2:
+# Stable 4.44 uses the wrong POSIX sigaction callback return type:
+#
+#   static void *signal_received_for_ignore(...)
+#
+# NDK 27 correctly requires:
+#
+#   void (*)(int, siginfo_t *, void *)
+#
+# Current upstream SoftEtherVPN has already fixed exactly this function.
+# Use a whitespace-tolerant regex because Stable keeps a trailing space
+# after the function signature and the repository historically uses CRLF.
+# ----------------------------------------------------------------------
 p = root / "src/Mayaqua/Unix.c"
 s = p.read_text(errors="surrogateescape")
 
-old1 = '''static void *signal_received_for_ignore(int sig, siginfo_t *info, void *ucontext)
-{
-\treturn NULL;
-}'''
-old2 = '''static void *signal_received_for_ignore(int sig, siginfo_t *info, void *ucontext)
-{
-\treturn NULL;
-}'''
-new2 = '''static void signal_received_for_ignore(int sig, siginfo_t *info, void *ucontext)
+fixed_signature = re.compile(
+    r"static\s+void\s+signal_received_for_ignore\s*"
+    r"\(\s*int\s+sig\s*,\s*siginfo_t\s*\*\s*info\s*,\s*void\s*\*\s*ucontext\s*\)",
+    re.MULTILINE,
+)
+
+if not fixed_signature.search(s):
+    buggy_function = re.compile(
+        r"static\s+void\s*\*\s*signal_received_for_ignore\s*"
+        r"\(\s*int\s+sig\s*,\s*siginfo_t\s*\*\s*info\s*,\s*void\s*\*\s*ucontext\s*\)"
+        r"\s*\{\s*return\s+NULL\s*;\s*\}",
+        re.MULTILINE | re.DOTALL,
+    )
+
+    replacement = """static void signal_received_for_ignore(int sig, siginfo_t *info, void *ucontext)
 {
 \t(void)sig;
 \t(void)info;
 \t(void)ucontext;
-}'''
+}"""
 
-if new2 not in s:
-    if old1 in s:
-        s = s.replace(old1, new2, 1)
-    elif old2 in s:
-        s = s.replace(old2, new2, 1)
-    else:
-        raise SystemExit("Unix sigaction callback anchor not found")
+    s, n = buggy_function.subn(replacement, s, count=1)
+    if n != 1:
+        pos = s.find("signal_received_for_ignore")
+        if pos >= 0:
+            excerpt = repr(s[max(0, pos - 160): pos + 420])
+        else:
+            excerpt = "<symbol not present>"
+        raise SystemExit(
+            "Unix sigaction callback: expected exactly 1 buggy function; "
+            f"matched {n}; nearby={excerpt}"
+        )
 
-s = s.replace(
-    "sa.sa_sigaction = signal_received_for_ignore;",
-    "sa.sa_sigaction = &signal_received_for_ignore;",
-    1,
+assign_old = re.compile(
+    r"sa\.sa_sigaction\s*=\s*&?\s*signal_received_for_ignore\s*;"
 )
+s, n_assign = assign_old.subn(
+    "sa.sa_sigaction = &signal_received_for_ignore;", s, count=1
+)
+if n_assign != 1:
+    raise SystemExit(
+        f"Unix sigaction assignment: expected exactly 1 match, got {n_assign}"
+    )
+
 p.write_text(s, errors="surrogateescape")
 
+# ----------------------------------------------------------------------
+# Safety proof: protocol/session/network/auth implementation stays pinned.
+# ----------------------------------------------------------------------
 for rel, old_hash in before.items():
     new_hash = subprocess.check_output(
         ["git", "-C", str(root), "hash-object", rel], text=True
@@ -96,22 +127,25 @@ for rel, old_hash in before.items():
 changed = subprocess.check_output(
     ["git", "-C", str(root), "diff", "--name-only"], text=True
 ).splitlines()
+
 allowed = {
     "src/Mayaqua/Mayaqua.c",
     "src/Mayaqua/Unix.c",
 }
 unexpected = [x for x in changed if x not in allowed]
 if unexpected:
-    raise SystemExit("unexpected official source modifications: " + ", ".join(unexpected))
+    raise SystemExit(
+        "unexpected official source modifications: " + ", ".join(unexpected)
+    )
 
 u = (root / "src/Mayaqua/Unix.c").read_text(errors="surrogateescape")
-if "static void *signal_received_for_ignore" in u:
+if re.search(r"static\s+void\s*\*\s*signal_received_for_ignore", u):
     raise SystemExit("bad Stable sigaction callback signature still present")
-if "static void signal_received_for_ignore" not in u:
-    raise SystemExit("fixed sigaction callback signature missing")
+if not fixed_signature.search(u):
+    raise SystemExit("fixed void sigaction callback signature missing")
 if "sa.sa_sigaction = &signal_received_for_ignore;" not in u:
     raise SystemExit("fixed sigaction assignment missing")
 
 print("official SoftEther v4.44-9807 source verified")
-print("Protocol/Connection/Session/Network/Encrypt/Pack remain byte-for-byte official")
-print("Android-only Mayaqua adaptations: /tmp check + upstream sigaction fix")
+print("Protocol.c / Connection.c / Session.c / Network.c / Encrypt.c / Pack.c unchanged")
+print("Android Mayaqua patches: minimal-mode temp dir + upstream sigaction portability fix")
