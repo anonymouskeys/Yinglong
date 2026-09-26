@@ -69,6 +69,14 @@ jobs:
           p.write_text(s)
           PY
 
+      - name: Patch SoftEther native core for Android
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/patch_softether_module.py third_party/SoftEtherClient
+          grep -q 'ssl_write_all_control' third_party/SoftEtherClient/src/main/cpp/softether-core/src/proto/softether_protocol.c
+          grep -q 'client.nativeSetMaxConnection(nativeHandle, 1)' third_party/SoftEtherClient/src/main/java/vn/unlimit/softether/controller/ConnectionController.kt
+
       - name: Fetch pinned MS-SSTP Android engine
         shell: bash
         run: |

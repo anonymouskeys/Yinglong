@@ -19,14 +19,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
 /**
- * Finds reachable SoftEther TCP listeners using the concrete TCP port already
- * embedded in each locally stored VPN Gate OpenVPN profile.
+ * Finds reachable native SoftEther SSL-VPN TCP listeners.
  *
- * VPN Gate generates its OpenVPN TCP profile from an available TCP listener of
- * the same SoftEther VPN Server.  Therefore the profile's remote TCP port is a
- * much stronger SoftEther candidate than blindly trying 443/992/5555.
- *
- * No network catalogue refresh is performed here.
+ * OpenVPN profile ports are protocol-specific and are NOT SoftEther listeners.
  */
 public final class SoftEtherProbe {
     private static final int[] NATIVE_PORTS = {443, 992, 5555};
@@ -81,15 +76,6 @@ public final class SoftEtherProbe {
             // Prefer the server's native SoftEther listener candidates.
             for (int port : NATIVE_PORTS) target.ports.add(port);
 
-            // Also retain the concrete TCP port advertised in the VPN Gate
-            // OpenVPN profile. It may be useful on servers with a custom port.
-            try {
-                OpenVpnProfileUtil.Endpoint ep = OpenVpnProfileUtil.endpoint(relay);
-                if (ep != null && ep.tcp && ep.port > 0 && ep.port <= 65535) {
-                    target.ports.add(ep.port);
-                }
-            } catch (Throwable ignored) {
-            }
         }
 
         List<HostTarget> hosts = new ArrayList<>(targets.values());
@@ -98,7 +84,7 @@ public final class SoftEtherProbe {
 
         AppLog.i(
                 "se-probe",
-                "SoftEther scan start source=catalog+native-defaults hosts=" + hosts.size()
+                "SoftEther scan start source=native-defaults hosts=" + hosts.size()
                         + " endpoints=" + endpointCount
                         + " concurrency=" + concurrency
                         + " timeoutMs=" + timeoutMs

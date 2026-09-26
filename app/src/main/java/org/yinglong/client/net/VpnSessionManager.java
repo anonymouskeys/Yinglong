@@ -44,7 +44,7 @@ public final class VpnSessionManager {
     private volatile String detail = "";
 
     private static final int BOOTSTRAP_ROUNDS = 3;
-    private static final int SOFTETHER_MAX_RELAY_ATTEMPTS = 4;
+    private static final int SOFTETHER_MAX_RELAY_ATTEMPTS = 6;
     private static final long SOFTETHER_ATTEMPT_TIMEOUT_MS = 45_000L;
     private static final int SSTP_MAX_ATTEMPTS = 8;
     private static final long SSTP_ATTEMPT_TIMEOUT_MS = 30_000L;
@@ -211,7 +211,7 @@ public final class VpnSessionManager {
                                 }
                             });
 
-                    Set<String> triedRelayIps = new HashSet<>();
+                    Set<String> triedSoftEndpoints = new HashSet<>();
                     int softAttempt = 0;
 
                     for (SoftEtherProbe.Result result : softCandidates) {
@@ -220,8 +220,8 @@ public final class VpnSessionManager {
 
                         Relay relay = result.relay;
 
-                        // Do not burn the entire budget on 443/992/5555 of one server.
-                        if (!triedRelayIps.add(relay.ip)) continue;
+                        String softKey = relay.ip + ":" + result.port;
+                        if (!triedSoftEndpoints.add(softKey)) continue;
                         if (softAttempt >= SOFTETHER_MAX_RELAY_ATTEMPTS) break;
                         softAttempt++;
 

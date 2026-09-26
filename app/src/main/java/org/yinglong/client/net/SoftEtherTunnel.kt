@@ -97,7 +97,7 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
             AppLog.i(
                 "se-auth",
                 "auth attempt ${index + 1}/${variants.size} mode=${variant.label} " +
-                    "hub=VPNGATE user=vpn relay=${relay.ip} port=$port"
+                    "hub=vpngate user=vpn relay=${relay.ip} port=$port"
             )
 
             if (connectVariant(relay, port, perVariantTimeout, variant, progress)) {
@@ -155,7 +155,7 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
             serverPort = port,
             username = "vpn",
             password = variant.password,
-            virtualHub = "VPNGATE",
+            virtualHub = "vpngate",
             authMethod = variant.method,
             sessionName = "Yinglong ${relay.countryShort} ${relay.ip}",
             localAddress = "10.21.0.2",
@@ -172,8 +172,8 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
             connectTimeoutMs = 10_000,
             country = relay.countryShort ?: "",
             clientProductName = "Yinglong",
-            clientVersion = "0.9.2",
-            clientBuild = 30
+            clientVersion = "0.9.3",
+            clientBuild = 31
         )
 
         val intent = Intent(appContext, SoftEtherVpnService::class.java).apply {
@@ -185,7 +185,7 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
         AppLog.i(
             "se-tunnel",
             "START SoftEther relay=${relay.ip} port=$port auth=${variant.label} " +
-                "hub=VPNGATE password=$passwordState"
+                "hub=vpngate password=$passwordState"
         )
         attempt.stage(
             "ENGINE_START",
@@ -282,7 +282,12 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
             SoftEtherVpnService.STATE_ERROR -> {
                 val failedAt = attempt?.lastStage ?: "unknown"
                 failureStage = failedAt
-                failure = "SoftEther ERROR after $failedAt"
+                val nativeReason = SoftEtherVpnService.lastErrorMessage
+                failure = if (nativeReason.isBlank()) {
+                    "SoftEther ERROR after $failedAt"
+                } else {
+                    "SoftEther $nativeReason after $failedAt"
+                }
                 attempt?.stage("ERROR", failure)
                 if (attempt != null && attempt.done.count > 0) {
                     attempt.success = false
