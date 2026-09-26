@@ -20,7 +20,7 @@ for i in 1 2 3 4 5 6; do
   if curl --fail --location --silent --show-error \
       --retry 2 --retry-delay 1 --connect-timeout 15 --max-time 120 \
       -H 'Cache-Control: no-cache' \
-      -A 'Yinglong-seed-builder/0.3.3' \
+      -A 'Yinglong-seed-builder/0.9.1' \
       "$URL?_yinglong=$NONCE" -o "$F"; then
     if grep -q '^#HostName,IP,Score,Ping,Speed,CountryLong,CountryShort' "$F"; then
       grep -Ev '^(\*vpn_servers|\*|#|[[:space:]]*$)' "$F" >> "$COMBINED" || true
@@ -28,11 +28,6 @@ for i in 1 2 3 4 5 6; do
   fi
   sleep 1
 done
-
-# Also keep every profile bundled by previous Yinglong builds.
-if [ -f "$DEST" ]; then
-  grep -Ev '^(\*vpn_servers|\*|#|[[:space:]]*$)' "$DEST" >> "$COMBINED" || true
-fi
 
 # The official HTML page can expose profiles that are absent from the current CSV slice.
 # This is optional so a Termux installation without Python still builds normally.
@@ -45,6 +40,17 @@ if command -v python >/dev/null 2>&1; then
   fi
 else
   echo "[Yinglong] python not found; skipping official HTML harvest" >&2
+fi
+
+# Avoid accumulating dead historical relays forever. GitHub Actions can reach
+# VPN Gate even when the phone network poisons its DNS, so current live rows
+# are the preferred APK seed. Use the previous seed only as emergency fallback.
+LIVE_COUNT="$(grep -Ev '^(\*vpn_servers|\*|#|[[:space:]]*$)' "$COMBINED" | wc -l | tr -d ' ')"
+if [ "$LIVE_COUNT" -lt 10 ] && [ -f "$DEST" ]; then
+  echo "[Yinglong] only $LIVE_COUNT current rows; adding previous seed as emergency fallback"
+  grep -Ev '^(\*vpn_servers|\*|#|[[:space:]]*$)' "$DEST" >> "$COMBINED" || true
+else
+  echo "[Yinglong] fresh-only seed rows before dedupe: $LIVE_COUNT"
 fi
 
 OUT="$WORK/out.csv"

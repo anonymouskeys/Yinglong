@@ -50,7 +50,7 @@ public final class MainActivity extends Activity {
     @Override protected void onCreate(Bundle stateBundle) {
         super.onCreate(stateBundle);
         AppLog.init(this);
-        AppLog.i("ui", "MainActivity created; v0.9.0 OpenVPN3 Core engine");
+        AppLog.i("ui", "MainActivity created; v0.9.1 OpenVPN3 Core engine");
         manager = VpnSessionManager.get(this);
         setContentView(buildUi());
     }

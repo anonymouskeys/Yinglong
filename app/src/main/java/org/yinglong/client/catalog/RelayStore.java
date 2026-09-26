@@ -56,6 +56,21 @@ public final class RelayStore {
         return mergeRelays(bundled, 1);
     }
 
+    /** Replace the active pool with the seed shipped in this APK version. */
+    public synchronized int replaceWithBundledSeed() throws IOException {
+        List<Relay> bundled;
+        try (InputStream in = context.getAssets().open(SEED_ASSET);
+             InputStreamReader r = new InputStreamReader(
+                     in, java.nio.charset.StandardCharsets.UTF_8)) {
+            bundled = RelayCsv.parse(r);
+        }
+        if (bundled.isEmpty()) {
+            throw new IOException("Bundled relay seed is empty");
+        }
+        writeAtomically(new ArrayList<>(bundled));
+        return bundled.size();
+    }
+
     public synchronized List<Relay> read() throws IOException {
         ensureSeeded();
         try (FileReader r = new FileReader(activeFile())) {

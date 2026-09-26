@@ -99,9 +99,9 @@ public final class RelayUpdater {
                         || msg.contains("/0.0.0.0:")
                         || msg.contains("www.vpngate.net/127.0.0.1")) {
                     AppLog.w("catalog",
-                            "primary VPN Gate origin resolves to a blocked/local address; "
-                                    + "switching to official HTML mirror");
-                    break;
+                            "VPN Gate DNS is poisoned/blocked on this network; "
+                                    + "using CI-fresh bundled seed");
+                    throw new IOException("VPN_GATE_DNS_BLOCKED: " + msg, e);
                 }
             }
 
@@ -437,7 +437,7 @@ public final class RelayUpdater {
         c.setInstanceFollowRedirects(true);
         c.setConnectTimeout(Math.max(1_000, connectTimeoutMs));
         c.setReadTimeout(Math.max(1_000, readTimeoutMs));
-        c.setRequestProperty("User-Agent", "Yinglong/0.9.0 (+VPN Gate client)");
+        c.setRequestProperty("User-Agent", "Yinglong/0.9.1 (+VPN Gate client)");
         c.setRequestProperty("Accept", "text/plain,text/csv,text/html,application/x-openvpn-profile,*/*;q=0.1");
         try {
             int code = c.getResponseCode();

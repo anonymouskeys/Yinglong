@@ -152,6 +152,7 @@ public final class VpnSessionManager {
 
     private void runSession(long token) {
         boolean maintenanceStarted = false;
+        boolean restrictedNetwork = false;
 
         try {
             setState(State.SEARCHING, "Загружаю свежие VPN Gate relay…");
@@ -160,8 +161,23 @@ public final class VpnSessionManager {
                 int pool = new RelayUpdater(context).bootstrapMerged(BOOTSTRAP_ROUNDS);
                 AppLog.i("session", "live relay bootstrap merged; pool=" + pool);
             } catch (Throwable e) {
-                AppLog.w("session", "live relay bootstrap unavailable; using bundled/local pool: "
-                        + e.getClass().getSimpleName() + ": " + safe(e.getMessage()));
+                String bootstrapError = safe(e.getMessage());
+                restrictedNetwork =
+                        bootstrapError.contains("VPN_GATE_DNS_BLOCKED")
+                                || bootstrapError.contains("/127.0.0.1:")
+                                || bootstrapError.contains("/0.0.0.0:");
+
+                AppLog.w("session",
+                        "live relay bootstrap unavailable; using bundled/local pool: "
+                                + e.getClass().getSimpleName() + ": " + bootstrapError);
+
+                if (restrictedNetwork) {
+                    AppLog.w("session",
+                            "RESTRICTED_NETWORK enabled: VPN Gate DNS is poisoned; "
+                                    + "OpenVPN UDP will be tried before TCP");
+                    setState(State.SEARCHING,
+                            "Сеть фильтрует VPN Gate • сначала OpenVPN UDP…");
+                }
             }
 
             while (active(token)) {
@@ -286,11 +302,13 @@ public final class VpnSessionManager {
                                     }
                                 });
 
-                        ovpnCandidates = orderOpenVpnCandidates(ovpnCandidates);
+                        ovpnCandidates = orderOpenVpnCandidates(
+                                ovpnCandidates,
+                                restrictedNetwork
+                        );
                         AppLog.i("session", "OpenVPN candidates="
-                                + ovpnCandidates.size());
-
-                        boolean[] engineOrder = new boolean[]{false, true};
+                                + ovpnCandidates.size()
+                                + " restrictedNetwork=" + restrictedNetwork);
                         Set<String> triedRelays = new HashSet<>();
                         int relayAttempt = 0;
 
@@ -311,6 +329,10 @@ public final class VpnSessionManager {
 
                             final String endpoint = (result.tcp ? "tcp:" : "udp:")
                                     + result.port;
+
+                            final boolean[] engineOrder = result.tcp
+                                    ? new boolean[]{false, true}
+                                    : new boolean[]{true, false};
 
                             for (boolean useOpenVpn3 : engineOrder) {
                                 if (!active(token) || connectedRelay != null) break;
@@ -503,7 +525,8 @@ public final class VpnSessionManager {
     }
 
     private static List<RelayProbe.Result> orderOpenVpnCandidates(
-            List<RelayProbe.Result> ranked) {
+            List<RelayProbe.Result> ranked,
+            boolean preferUdp) {
         List<RelayProbe.Result> tcp = new ArrayList<>();
         List<RelayProbe.Result> udp = new ArrayList<>();
 
@@ -514,11 +537,19 @@ public final class VpnSessionManager {
         }
 
         List<RelayProbe.Result> out = new ArrayList<>(ranked.size());
-        // TCP entries passed an actual connect() probe. UDP entries are only
-        // unverified fallbacks, so exhaust verified TCP first.
-        out.addAll(tcp);
-        out.addAll(udp);
 
+        if (preferUdp) {
+            out.addAll(udp);
+            out.addAll(tcp);
+        } else {
+            out.addAll(tcp);
+            out.addAll(udp);
+        }
+
+        AppLog.i("session",
+                "candidate order preferUdp=" + preferUdp
+                        + " udp=" + udp.size()
+                        + " tcp=" + tcp.size());
         return out;
     }
 

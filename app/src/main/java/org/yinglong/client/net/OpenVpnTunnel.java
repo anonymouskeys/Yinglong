@@ -291,7 +291,7 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
 
         long noReplyMs = tcpTransport
                 ? (core3 ? 14_000L : 10_000L)
-                : (core3 ? 12_000L : 9_000L);
+                : (core3 ? 8_000L : 7_000L);
 
         long repliedMs = Math.max(
                 timeoutMs,
@@ -606,6 +606,15 @@ public final class OpenVpnTunnel implements VpnStatus.StateListener, VpnStatus.L
 
             line = line.trim();
             if (line.isEmpty()) {
+                return;
+            }
+
+            if (line.contains("linker: Warning:")
+                    && line.contains("libovpnexec.so")
+                    && line.contains("is not a directory")) {
+                AppLog.i("openvpn-v4",
+                        "OpenVPN2 native binary loaded; harmless upstream "
+                                + "LD_LIBRARY_PATH warning suppressed");
                 return;
             }
 

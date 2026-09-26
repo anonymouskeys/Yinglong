@@ -12,12 +12,27 @@ public final class YinglongApp extends Application {
         super.onCreate();
         AppLog.init(this);
         AppLog.installCrashHandler(this);
-        AppLog.i("app", "Yinglong process started v0.9.0 sdk=" + Build.VERSION.SDK_INT
+        AppLog.i("app", "Yinglong process started v0.9.1 sdk=" + Build.VERSION.SDK_INT
                 + " device=" + Build.MANUFACTURER + " " + Build.MODEL);
         try {
             RelayStore store = new RelayStore(this);
-            int count = store.mergeBundledSeed();
-            AppLog.i("catalog", "bundled seed merged; active pool=" + count);
+            android.content.SharedPreferences seedPrefs =
+                    getSharedPreferences("catalog_seed_version_v1", MODE_PRIVATE);
+            int installedSeedVersion = seedPrefs.getInt("versionCode", -1);
+            int currentVersion = BuildConfig.VERSION_CODE;
+
+            int count;
+            if (installedSeedVersion != currentVersion) {
+                count = store.replaceWithBundledSeed();
+                seedPrefs.edit().putInt("versionCode", currentVersion).apply();
+                AppLog.i("catalog",
+                        "new APK seed installed fresh-only versionCode="
+                                + currentVersion + " active pool=" + count);
+            } else {
+                count = store.mergeBundledSeed();
+                AppLog.i("catalog",
+                        "bundled seed merged; active pool=" + count);
+            }
         } catch (Throwable e) {
             AppLog.e("catalog", "failed to seed/merge relay catalogue", e);
         }
