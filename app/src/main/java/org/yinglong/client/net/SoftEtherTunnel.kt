@@ -92,10 +92,6 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
         val perVariantTimeout = timeoutMs
             .coerceAtLeast(25_000L)
             .coerceAtMost(35_000L)
-        val nativeConnectTimeoutMs = (perVariantTimeout - 5_000L)
-            .coerceAtLeast(15_000L)
-            .coerceAtMost(30_000L)
-
         var lastReason = ""
         for ((index, variant) in variants.withIndex()) {
             AppLog.i(
@@ -149,6 +145,13 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
     ): Boolean {
         failure = ""
         failureStage = ""
+
+        // Native Cedar gets most of the outer attempt budget. Keep a few seconds
+        // for the Android service to deliver the final state/error back to Yinglong.
+        val nativeConnectTimeoutMs = (timeoutMs - 5_000L)
+            .coerceAtLeast(15_000L)
+            .coerceAtMost(30_000L)
+
         stopInternal(900L)
 
         val attempt = Attempt(relay, port, variant.label, progress)
@@ -191,7 +194,7 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
             "se-tunnel",
             "START SoftEther relay=${relay.ip} port=$port auth=${variant.label} " +
                 "hub=VPNGATE password=$passwordState nativeTimeoutMs=$nativeConnectTimeoutMs " +
-                "outerTimeoutMs=$perVariantTimeout"
+                "outerTimeoutMs=$timeoutMs"
         )
         attempt.stage(
             "ENGINE_START",
