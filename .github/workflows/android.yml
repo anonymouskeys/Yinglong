@@ -149,6 +149,8 @@ jobs:
           ! grep -q 'ctx->cedar = NewCedar(NULL, NULL);' "$CPP/official_android/android_official_jni.c"
           grep -Fq 'RL_LIBRARY_VERSION=\"8.0\"' "$CPP/readline.cmake"
           grep -q 'NewClientSession' "$CPP/official_android/android_official_jni.c"
+          grep -q '#ifdef __ANDROID__' "$CPP/official/SoftEtherVPN/src/Mayaqua/Mayaqua.h"
+          grep -q '#include <iconv.h>' "$CPP/official/SoftEtherVPN/src/Mayaqua/Mayaqua.h"
 
       - name: Fetch pinned MS-SSTP Android engine
         shell: bash
