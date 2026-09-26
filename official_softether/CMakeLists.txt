@@ -58,6 +58,7 @@ target_compile_definitions(cedar_official PRIVATE
 )
 target_compile_definitions(mayaqua_official PRIVATE
     UNIX UNIX_LINUX NO_VLAN SKIP_CPU_FEATURES
+    getaddrinfo=YinglongGetAddrInfo
     _REENTRANT REENTRANT _THREAD_SAFE _THREADSAFE THREAD_SAFE THREADSAFE _FILE_OFFSET_BITS=64
 )
 
@@ -83,6 +84,7 @@ set_target_properties(crypto_prebuilt PROPERTIES IMPORTED_LOCATION "${PREBUILT_D
 
 add_library(softether SHARED
     "${CMAKE_CURRENT_SOURCE_DIR}/official_android/android_official_jni.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/official_android/android_dns.c"
 )
 
 target_include_directories(softether PRIVATE

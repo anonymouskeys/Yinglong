@@ -59,9 +59,7 @@ public final class SoftEtherProbe {
     public static List<Result> rank(List<Relay> relays, int maxHosts, int concurrency,
                                     int timeoutMs, ProgressListener progress) {
         List<Relay> sorted = new ArrayList<>(relays);
-        sorted.sort(Comparator
-                .comparingLong((Relay r) -> r.score).reversed()
-                .thenComparingInt(r -> r.pingMs <= 0 ? Integer.MAX_VALUE : r.pingMs));
+
 
         Map<String, HostTarget> targets = new LinkedHashMap<>();
         for (Relay relay : sorted) {
@@ -155,7 +153,11 @@ public final class SoftEtherProbe {
                                 + " connectMs=" + ms
                 );
                 out.add(new Result(target.relay, port, ms));
-            } catch (Throwable ignored) {
+            } catch (Exception failure) {
+                if (port == 443) {
+                    AppLog.w("se-probe", "tcp failed ip=" + target.relay.ip
+                            + " port=" + port + " reason=" + failure);
+                }
             }
         }
         return out;

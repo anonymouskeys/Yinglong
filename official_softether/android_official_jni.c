@@ -868,10 +868,14 @@ static void stop_official_session(OFFICIAL_CTX *ctx)
 /* JNI                                                                       */
 /* ------------------------------------------------------------------------- */
 
+int YinglongDnsInit(JavaVM *vm, JNIEnv *env);
+
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved)
 {
-    (void)vm;
+    JNIEnv *env = NULL;
     (void)reserved;
+    if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK ||
+        !YinglongDnsInit(vm, env)) return JNI_ERR;
     ensure_official_init();
     return JNI_VERSION_1_6;
 }

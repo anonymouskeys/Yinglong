@@ -181,6 +181,7 @@ public final class VpnSessionManager {
                 }
             }
 
+            int softRelayOffset = 0;
             while (active(token)) {
                 List<Relay> relays = new RelayStore(context).read();
                 AppLog.i("session", "relay pool size=" + relays.size());
@@ -205,6 +206,10 @@ public final class VpnSessionManager {
                     List<Relay> softRelays = new ArrayList<>(relays);
                     softRelays.sort((a, b) -> Long.compare(b.score, a.score));
                     softRelays = diversifySoftEtherRelays(softRelays);
+                    if (!softRelays.isEmpty()) {
+                        java.util.Collections.rotate(softRelays, -(softRelayOffset % softRelays.size()));
+                        softRelayOffset = (softRelayOffset + SOFTETHER_MAX_RELAY_ATTEMPTS) % softRelays.size();
+                    }
 
                     final int softAttemptLimit = restrictedNetwork
                             ? Math.min(

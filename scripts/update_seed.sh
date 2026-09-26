@@ -42,15 +42,10 @@ else
   echo "[Yinglong] python not found; skipping official HTML harvest" >&2
 fi
 
-# Avoid accumulating dead historical relays forever. GitHub Actions can reach
-# VPN Gate even when the phone network poisons its DNS, so current live rows
-# are the preferred APK seed. Use the previous seed only as emergency fallback.
-LIVE_COUNT="$(grep -Ev '^(\*vpn_servers|\*|#|[[:space:]]*$)' "$COMBINED" | wc -l | tr -d ' ')"
-if [ "$LIVE_COUNT" -lt 10 ] && [ -f "$DEST" ]; then
-  echo "[Yinglong] only $LIVE_COUNT current rows; adding previous seed as emergency fallback"
+# Keep historical candidates when an API response is only a partial slice.
+# Fresh rows precede saved rows, so the newest profile wins for a duplicate IP.
+if [ -f "$DEST" ]; then
   grep -Ev '^(\*vpn_servers|\*|#|[[:space:]]*$)' "$DEST" >> "$COMBINED" || true
-else
-  echo "[Yinglong] fresh-only seed rows before dedupe: $LIVE_COUNT"
 fi
 
 OUT="$WORK/out.csv"

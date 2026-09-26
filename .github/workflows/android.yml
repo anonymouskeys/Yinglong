@@ -17,6 +17,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      - name: Regression checks for NAT-T DNS and catalogue preservation
+        run: |
+          cc -std=gnu11 -Wall -Wextra -Werror -I tests/dns tests/dns/adapter_test.c -o /tmp/dns-adapter-test
+          /tmp/dns-adapter-test
+          python3 tests/test_seed_preservation.py
+
       - name: Set up Java 17
         uses: actions/setup-java@v5
         with:
@@ -117,6 +123,8 @@ jobs:
           cp official_softether/android_official_jni.c \
             "$CPP/official_android/android_official_jni.c"
 
+          cp official_softether/android_dns.c "$CPP/official_android/android_dns.c"
+
           python3 official_softether/patch_official_android.py \
             "$CPP/official/SoftEtherVPN"
 
@@ -187,7 +195,7 @@ jobs:
           bash scripts/update_seed.sh
 
       - name: Build debug APK
-        run: gradle --no-daemon :app:assembleDebug
+        run: gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug
 
       - name: Verify VPN engine packaging
         shell: bash

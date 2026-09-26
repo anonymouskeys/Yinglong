@@ -179,8 +179,8 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
             connectTimeoutMs = nativeConnectTimeoutMs.toInt(),
             country = relay.countryShort ?: "",
             clientProductName = "Yinglong",
-            clientVersion = "1.0.5",
-            clientBuild = 39,
+            clientVersion = "1.0.6",
+            clientBuild = 40,
             fullDuplex = true
         )
 

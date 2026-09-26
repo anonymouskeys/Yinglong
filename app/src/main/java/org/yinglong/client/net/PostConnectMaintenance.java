@@ -63,10 +63,9 @@ public final class PostConnectMaintenance {
             }
         }
 
-        if (!remove.isEmpty()) {
-            store.removeIps(remove);
-            for (String ip : remove) health.forget(ip);
-        }
-        AppLog.i("maintenance", "prune attempted=" + attempted + " removed=" + remove.size());
+        // Failed reachability from one network is not proof a volunteer relay
+        // is dead. Keep accumulated profiles; health data can guide ranking.
+        AppLog.i("maintenance", "health probes=" + attempted
+                + " unreachable=" + remove.size() + " removed=0 (preserve catalogue)");
     }
 }

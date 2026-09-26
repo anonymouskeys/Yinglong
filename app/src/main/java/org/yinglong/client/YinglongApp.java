@@ -24,10 +24,10 @@ public final class YinglongApp extends Application {
 
             int count;
             if (installedSeedVersion != currentVersion) {
-                count = store.replaceWithBundledSeed();
+                count = store.mergeBundledSeed();
                 seedPrefs.edit().putInt("versionCode", currentVersion).apply();
                 AppLog.i("catalog",
-                        "new APK seed installed fresh-only versionCode="
+                        "new APK seed merged without deleting saved relays versionCode="
                                 + currentVersion + " active pool=" + count);
             } else {
                 count = store.mergeBundledSeed();

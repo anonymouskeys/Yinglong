@@ -25,6 +25,8 @@ import java.util.regex.Pattern;
 
 /** Official VPN Gate sources only, with persistent diagnostics. */
 public final class RelayUpdater {
+    private static final okhttp3.OkHttpClient CATALOG_HTTP = new okhttp3.OkHttpClient.Builder()
+            .dns(org.yinglong.client.net.BootstrapDns.DNS).followSslRedirects(false).build();
     public static final String VPN_GATE_CSV = "https://www.vpngate.net/api/iphone/";
     public static final String VPN_GATE_LIST = "https://www.vpngate.net/en/";
     public static final String VPN_GATE_ALT_LIST = "https://download.vpngate.jp/en/";
@@ -101,7 +103,7 @@ public final class RelayUpdater {
                     AppLog.w("catalog",
                             "VPN Gate DNS is poisoned/blocked on this network; "
                                     + "using CI-fresh bundled seed");
-                    throw new IOException("VPN_GATE_DNS_BLOCKED: " + msg, e);
+                    break; // Still try independent official HTML origins below.
                 }
             }
 
@@ -433,16 +435,19 @@ public final class RelayUpdater {
     }
 
     private static byte[] fetchBytes(String url, long max, int connectTimeoutMs, int readTimeoutMs) throws IOException {
-        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
-        c.setInstanceFollowRedirects(true);
-        c.setConnectTimeout(Math.max(1_000, connectTimeoutMs));
-        c.setReadTimeout(Math.max(1_000, readTimeoutMs));
-        c.setRequestProperty("User-Agent", "Yinglong/0.9.5 (+VPN Gate client)");
-        c.setRequestProperty("Accept", "text/plain,text/csv,text/html,application/x-openvpn-profile,*/*;q=0.1");
-        try {
-            int code = c.getResponseCode();
-            if (code < 200 || code >= 300) throw new IOException("HTTP " + code + " from " + url);
-            try (InputStream in = c.getInputStream(); ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+        okhttp3.OkHttpClient client = CATALOG_HTTP.newBuilder()
+                .connectTimeout(Math.max(1000, connectTimeoutMs), java.util.concurrent.TimeUnit.MILLISECONDS)
+                .readTimeout(Math.max(1000, readTimeoutMs), java.util.concurrent.TimeUnit.MILLISECONDS)
+                .callTimeout(Math.max(15000L, (long)connectTimeoutMs + readTimeoutMs + 8000L),
+                        java.util.concurrent.TimeUnit.MILLISECONDS).build();
+        okhttp3.Request request = new okhttp3.Request.Builder().url(url)
+                .header("User-Agent", "Yinglong/1.0.6 (+VPN Gate client)")
+                .header("Accept", "text/plain,text/csv,text/html,application/x-openvpn-profile,*/*;q=0.1")
+                .build();
+        try (okhttp3.Response response = client.newCall(request).execute()) {
+            if (!response.isSuccessful() || response.body() == null)
+                throw new IOException("HTTP " + response.code() + " from " + url);
+            try (InputStream in = response.body().byteStream(); ByteArrayOutputStream out = new ByteArrayOutputStream()) {
                 byte[] buf = new byte[64 * 1024];
                 long total = 0;
                 int n;
@@ -453,7 +458,7 @@ public final class RelayUpdater {
                 }
                 return out.toByteArray();
             }
-        } finally { c.disconnect(); }
+        }
     }
 
     private static URL absolute(String origin, String href) throws IOException {
