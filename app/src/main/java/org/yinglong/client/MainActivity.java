@@ -50,7 +50,8 @@ public final class MainActivity extends Activity {
     @Override protected void onCreate(Bundle stateBundle) {
         super.onCreate(stateBundle);
         AppLog.init(this);
-        AppLog.i("ui", "MainActivity created; v1.0.2 official SoftEther NDK27 portability");
+        AppLog.i("ui", "MainActivity created; v" + BuildConfig.VERSION_NAME
+                + " official SoftEther NDK27 portability");
         manager = VpnSessionManager.get(this);
         setContentView(buildUi());
     }

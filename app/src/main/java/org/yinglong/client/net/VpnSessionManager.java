@@ -45,6 +45,7 @@ public final class VpnSessionManager {
 
     private static final int BOOTSTRAP_ROUNDS = 3;
     private static final int SOFTETHER_MAX_RELAY_ATTEMPTS = 8;
+    private static final int SOFTETHER_RESTRICTED_MAX_RELAY_ATTEMPTS = 3;
     private static final long SOFTETHER_ATTEMPT_TIMEOUT_MS = 35_000L;
     private static final int SSTP_MAX_ATTEMPTS = 8;
     private static final long SSTP_ATTEMPT_TIMEOUT_MS = 30_000L;
@@ -204,17 +205,28 @@ public final class VpnSessionManager {
 
                     List<Relay> softRelays = new ArrayList<>(relays);
                     softRelays.sort((a, b) -> Long.compare(b.score, a.score));
+                    softRelays = diversifySoftEtherRelays(softRelays);
+
+                    final int softAttemptLimit = restrictedNetwork
+                            ? Math.min(
+                                    SOFTETHER_MAX_RELAY_ATTEMPTS,
+                                    SOFTETHER_RESTRICTED_MAX_RELAY_ATTEMPTS)
+                            : SOFTETHER_MAX_RELAY_ATTEMPTS;
+                    AppLog.i("session",
+                            "SoftEther attempt policy max=" + softAttemptLimit
+                                    + " restrictedNetwork=" + restrictedNetwork
+                                    + " outerTimeoutMs=" + SOFTETHER_ATTEMPT_TIMEOUT_MS);
 
                     int softAttempt = 0;
                     for (Relay relay : softRelays) {
                         if (!active(token)) return;
                         if (relay == null || relay.ip == null || relay.ip.isEmpty()) continue;
-                        if (softAttempt >= SOFTETHER_MAX_RELAY_ATTEMPTS) break;
+                        if (softAttempt >= softAttemptLimit) break;
                         softAttempt++;
 
                         final int directPort = 443;
                         final String base = "Official SoftEther " + softAttempt + "/"
-                                + SOFTETHER_MAX_RELAY_ATTEMPTS
+                                + softAttemptLimit
                                 + " • " + safe(relay.countryShort) + " " + relay.ip
                                 + " • Cedar TCP→NAT-T";
 
@@ -507,6 +519,32 @@ public final class VpnSessionManager {
                 AppLog.e("state", "listener failed", e);
             }
         }
+    }
+
+    private static List<Relay> diversifySoftEtherRelays(List<Relay> ranked) {
+        List<Relay> diverse = new ArrayList<>(ranked.size());
+        List<Relay> deferred = new ArrayList<>();
+        Set<String> ipv4Prefixes = new HashSet<>();
+
+        for (Relay relay : ranked) {
+            if (relay == null || relay.ip == null || relay.ip.isEmpty()) continue;
+
+            String ip = relay.ip;
+            int lastDot = ip.lastIndexOf('.');
+            String prefix = lastDot > 0 ? ip.substring(0, lastDot) : ip;
+
+            if (ipv4Prefixes.add(prefix)) {
+                diverse.add(relay);
+            } else {
+                deferred.add(relay);
+            }
+        }
+
+        diverse.addAll(deferred);
+        AppLog.i("session",
+                "SoftEther relay diversity uniquePrefixes=" + ipv4Prefixes.size()
+                        + " total=" + diverse.size());
+        return diverse;
     }
 
     private static List<RelayProbe.Result> orderOpenVpnCandidates(

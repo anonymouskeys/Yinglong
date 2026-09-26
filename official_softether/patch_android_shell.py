@@ -67,7 +67,7 @@ s=once(
     '''        var currentAssignedIp: String = ""
             private set
         var lastErrorMessage: String = ""
-            private set
+            internal set
         var currentTrafficSnapshot:''',
     "lastErrorMessage property"
 )
@@ -89,6 +89,26 @@ s=once(
                         Log.e(TAG, "VPN Error: $error")''',
     "capture lastErrorMessage"
 )
+p.write_text(s)
+
+# Preserve the mapped native error before ERROR state listeners are notified.
+# Without this, Yinglong sees STATE_ERROR first and loses the useful native
+# reason (for example ERR_TIMEOUT vs ERR_TCP_CONNECT).
+p,s=load("src/main/java/vn/unlimit/softether/controller/ConnectionController.kt")
+native_error_old = """        if (result != 0) {
+            currentState = ConnectionState.ERROR
+            throw Exception("Connection failed: ${SoftEtherError.getErrorString(result)} ($result)")
+        }
+"""
+native_error_new = """        if (result != 0) {
+            val nativeFailure = "Connection failed: ${SoftEtherError.getErrorString(result)} ($result)"
+            SoftEtherVpnService.lastErrorMessage = nativeFailure
+            currentState = ConnectionState.ERROR
+            throw Exception(nativeFailure)
+        }
+"""
+if native_error_new not in s:
+    s=once(s,native_error_old,native_error_new,"native error before state")
 p.write_text(s)
 
 

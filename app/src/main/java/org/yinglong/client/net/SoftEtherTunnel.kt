@@ -86,12 +86,15 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
             AuthVariant("PASSWORD", "vpn", AuthMethod.PASSWORD),
             AuthVariant("ANONYMOUS", "", AuthMethod.ANONYMOUS)
         )
-        // ConnectionController inside the SoftEther module already retries three times.
-        // The old wrapper killed the service at 18s, before the native timeout/retry
-        // path could finish. Give the module enough wall-clock time for a real result.
+        // The patched Android shell performs one native Cedar attempt per endpoint.
+        // Keep the outer budget larger than Cedar's own watchdog so the native
+        // direct-TCP -> NAT-T/R-UDP path can return a real result to Kotlin.
         val perVariantTimeout = timeoutMs
             .coerceAtLeast(25_000L)
             .coerceAtMost(35_000L)
+        val nativeConnectTimeoutMs = (perVariantTimeout - 5_000L)
+            .coerceAtLeast(15_000L)
+            .coerceAtMost(30_000L)
 
         var lastReason = ""
         for ((index, variant) in variants.withIndex()) {
@@ -168,13 +171,13 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
             useUdp = false,
             udpPort = 0,
             udpOnly = false,
-            // Per-native-attempt timeout. Three attempts plus retry delays fit
-            // inside the outer 55s attempt budget.
-            connectTimeoutMs = 8_000,
+            // Official TcpIpConnectEx may need time for direct TCP and its
+            // built-in NAT-T/R-UDP fallback. Leave 5s for shell error delivery.
+            connectTimeoutMs = nativeConnectTimeoutMs.toInt(),
             country = relay.countryShort ?: "",
             clientProductName = "Yinglong",
-            clientVersion = "1.0.3",
-            clientBuild = 37,
+            clientVersion = "1.0.4",
+            clientBuild = 38,
             fullDuplex = true
         )
 
@@ -187,7 +190,8 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
         AppLog.i(
             "se-tunnel",
             "START SoftEther relay=${relay.ip} port=$port auth=${variant.label} " +
-                "hub=VPNGATE password=$passwordState"
+                "hub=VPNGATE password=$passwordState nativeTimeoutMs=$nativeConnectTimeoutMs " +
+                "outerTimeoutMs=$perVariantTimeout"
         )
         attempt.stage(
             "ENGINE_START",

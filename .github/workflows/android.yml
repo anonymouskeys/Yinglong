@@ -151,6 +151,13 @@ jobs:
           grep -q 'NewClientSession' "$CPP/official_android/android_official_jni.c"
           grep -q '#ifdef __ANDROID__' "$CPP/official/SoftEtherVPN/src/Mayaqua/Mayaqua.h"
           grep -q '#include <iconv.h>' "$CPP/official/SoftEtherVPN/src/Mayaqua/Mayaqua.h"
+          grep -q 'SoftEtherVpnService.lastErrorMessage = nativeFailure' \
+            third_party/SoftEtherClient/src/main/java/vn/unlimit/softether/controller/ConnectionController.kt
+          grep -A2 'var lastErrorMessage' \
+            third_party/SoftEtherClient/src/main/java/vn/unlimit/softether/SoftEtherVpnService.kt \
+            | grep -q 'internal set'
+          grep -q 'coerceAtMost(30_000L)' \
+            app/src/main/java/org/yinglong/client/net/SoftEtherTunnel.kt
 
       - name: Fetch pinned MS-SSTP Android engine
         shell: bash
