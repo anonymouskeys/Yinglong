@@ -46,7 +46,7 @@ target_include_directories(mayaqua_official PUBLIC
 )
 
 target_compile_definitions(cedar_official PRIVATE
-    UNIX UNIX_LINUX
+    UNIX UNIX_LINUX NO_VLAN
     CEDAR_VERSION_MAJOR=4
     CEDAR_VERSION_MINOR=44
     CEDAR_VERSION_BUILD=9807
@@ -54,8 +54,13 @@ target_compile_definitions(cedar_official PRIVATE
     BUILD_PLACE="Android-NDK"
 )
 target_compile_definitions(mayaqua_official PRIVATE
-    UNIX UNIX_LINUX SKIP_CPU_FEATURES
+    UNIX UNIX_LINUX NO_VLAN SKIP_CPU_FEATURES
 )
+
+if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    target_compile_definitions(cedar_official PRIVATE CPU_64)
+    target_compile_definitions(mayaqua_official PRIVATE CPU_64)
+endif()
 
 target_compile_options(cedar_official PRIVATE
     -fPIC -fsigned-char -O2
