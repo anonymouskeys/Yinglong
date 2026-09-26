@@ -437,7 +437,7 @@ public final class RelayUpdater {
         c.setInstanceFollowRedirects(true);
         c.setConnectTimeout(Math.max(1_000, connectTimeoutMs));
         c.setReadTimeout(Math.max(1_000, readTimeoutMs));
-        c.setRequestProperty("User-Agent", "Yinglong/0.9.1 (+VPN Gate client)");
+        c.setRequestProperty("User-Agent", "Yinglong/0.9.4 (+VPN Gate client)");
         c.setRequestProperty("Accept", "text/plain,text/csv,text/html,application/x-openvpn-profile,*/*;q=0.1");
         try {
             int code = c.getResponseCode();

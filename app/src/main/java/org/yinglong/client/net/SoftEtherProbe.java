@@ -19,12 +19,15 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
 /**
- * Finds reachable native SoftEther SSL-VPN TCP listeners.
+ * Ranks reachable SoftEther SSL-VPN TCP endpoints.
  *
- * OpenVPN profile ports are protocol-specific and are NOT SoftEther listeners.
+ * VPN Gate normally advertises the same TCP endpoint in its SSL-VPN and
+ * OpenVPN-TCP columns. The bundled .ovpn profile therefore provides the
+ * strongest per-relay TCP-port hint. Standard SoftEther listener ports are
+ * retained only as fallbacks.
  */
 public final class SoftEtherProbe {
-    private static final int[] NATIVE_PORTS = {443, 992, 5555};
+    private static final int[] FALLBACK_PORTS = {443, 992, 5555, 5556};
 
     private SoftEtherProbe() {}
 
@@ -35,9 +38,16 @@ public final class SoftEtherProbe {
     private static final class HostTarget {
         final Relay relay;
         final Set<Integer> ports = new LinkedHashSet<>();
+        final Set<Integer> advertisedPorts = new LinkedHashSet<>();
 
         HostTarget(Relay relay) {
             this.relay = relay;
+        }
+
+        void add(int port, boolean advertised) {
+            if (port <= 0 || port > 65535) return;
+            ports.add(port);
+            if (advertised) advertisedPorts.add(port);
         }
     }
 
@@ -45,11 +55,13 @@ public final class SoftEtherProbe {
         public final Relay relay;
         public final int port;
         public final long connectMs;
+        public final boolean advertised;
 
-        Result(Relay relay, int port, long connectMs) {
+        Result(Relay relay, int port, long connectMs, boolean advertised) {
             this.relay = relay;
             this.port = port;
             this.connectMs = connectMs;
+            this.advertised = advertised;
         }
     }
 
@@ -73,9 +85,18 @@ public final class SoftEtherProbe {
                 targets.put(ip, target);
             }
 
-            // Prefer the server's native SoftEther listener candidates.
-            for (int port : NATIVE_PORTS) target.ports.add(port);
+            try {
+                OpenVpnProfileUtil.Endpoint ep = OpenVpnProfileUtil.endpoint(relay);
+                if (ep != null && ep.tcp) {
+                    target.add(ep.port, true);
+                }
+            } catch (Throwable e) {
+                AppLog.w("se-probe", "profile endpoint parse failed ip=" + ip);
+            }
 
+            for (int port : FALLBACK_PORTS) {
+                target.add(port, false);
+            }
         }
 
         List<HostTarget> hosts = new ArrayList<>(targets.values());
@@ -84,19 +105,13 @@ public final class SoftEtherProbe {
 
         AppLog.i(
                 "se-probe",
-                "SoftEther scan start source=native-defaults hosts=" + hosts.size()
+                "SoftEther scan start source=advertised-tcp+native-fallback hosts=" + hosts.size()
                         + " endpoints=" + endpointCount
                         + " concurrency=" + concurrency
                         + " timeoutMs=" + timeoutMs
         );
 
-        if (hosts.isEmpty()) {
-            AppLog.w(
-                    "se-probe",
-                    "no relay hosts available for SoftEther scan"
-            );
-            return new ArrayList<>();
-        }
+        if (hosts.isEmpty()) return new ArrayList<>();
 
         int workers = Math.max(1, Math.min(concurrency, 24));
         ExecutorService pool = Executors.newFixedThreadPool(workers);
@@ -135,19 +150,27 @@ public final class SoftEtherProbe {
         }
 
         out.sort((a, b) -> {
-            int pa = nativePortPriority(a.port);
-            int pb = nativePortPriority(b.port);
-            if (pa != pb) return Integer.compare(pa, pb);
+            if (a.advertised != b.advertised) return a.advertised ? -1 : 1;
             if (a.connectMs != b.connectMs) return Long.compare(a.connectMs, b.connectMs);
+
             int score = Long.compare(b.relay.score, a.relay.score);
             if (score != 0) return score;
+
+            int pa = fallbackPortPriority(a.port);
+            int pb = fallbackPortPriority(b.port);
+            if (pa != pb) return Integer.compare(pa, pb);
+
             return Integer.compare(
                     a.relay.pingMs <= 0 ? Integer.MAX_VALUE : a.relay.pingMs,
                     b.relay.pingMs <= 0 ? Integer.MAX_VALUE : b.relay.pingMs
             );
         });
 
-        AppLog.i("se-probe", "SoftEther scan done candidates=" + out.size());
+        int advertisedCount = 0;
+        for (Result r : out) if (r.advertised) advertisedCount++;
+
+        AppLog.i("se-probe", "SoftEther scan done candidates=" + out.size()
+                + " advertised=" + advertisedCount);
         return out;
     }
 
@@ -159,13 +182,16 @@ public final class SoftEtherProbe {
             try (Socket socket = new Socket()) {
                 socket.connect(new InetSocketAddress(target.relay.ip, port), timeoutMs);
                 long ms = Math.max(1L, android.os.SystemClock.elapsedRealtime() - start);
+                boolean advertised = target.advertisedPorts.contains(port);
+
                 AppLog.i(
                         "se-probe",
-                        "catalog tcp open ip=" + target.relay.ip
+                        "tcp open ip=" + target.relay.ip
                                 + " port=" + port
+                                + " source=" + (advertised ? "advertised" : "fallback")
                                 + " connectMs=" + ms
                 );
-                out.add(new Result(target.relay, port, ms));
+                out.add(new Result(target.relay, port, ms, advertised));
             } catch (Throwable ignored) {
             }
         }
@@ -173,10 +199,11 @@ public final class SoftEtherProbe {
         return out;
     }
 
-    private static int nativePortPriority(int port) {
+    private static int fallbackPortPriority(int port) {
         if (port == 443) return 0;
         if (port == 992) return 1;
         if (port == 5555) return 2;
-        return 3;
+        if (port == 5556) return 3;
+        return 4;
     }
 }

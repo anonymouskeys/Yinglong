@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Yinglong v0.7.0 OpenVPN3 Core VPN Gate session:
+ * Yinglong v0.9.4 VPN Gate session:
  * native SoftEther first, official VPN Gate OpenVPN profile as fallback.
  */
 public final class VpnSessionManager {
@@ -44,8 +44,8 @@ public final class VpnSessionManager {
     private volatile String detail = "";
 
     private static final int BOOTSTRAP_ROUNDS = 3;
-    private static final int SOFTETHER_MAX_RELAY_ATTEMPTS = 6;
-    private static final long SOFTETHER_ATTEMPT_TIMEOUT_MS = 45_000L;
+    private static final int SOFTETHER_MAX_RELAY_ATTEMPTS = 8;
+    private static final long SOFTETHER_ATTEMPT_TIMEOUT_MS = 35_000L;
     private static final int SSTP_MAX_ATTEMPTS = 8;
     private static final long SSTP_ATTEMPT_TIMEOUT_MS = 30_000L;
     private static final int OPENVPN_MAX_ATTEMPTS = 40;

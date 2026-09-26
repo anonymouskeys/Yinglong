@@ -11,8 +11,8 @@ android {
         applicationId 'org.yinglong.client'
         minSdk 24
         targetSdk 35
-        versionCode 31
-        versionName '0.9.3'
+        versionCode 32
+        versionName '0.9.4'
     }
 
     buildFeatures {

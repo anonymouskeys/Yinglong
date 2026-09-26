@@ -75,7 +75,7 @@ jobs:
           set -euo pipefail
           python3 scripts/patch_softether_module.py third_party/SoftEtherClient
           grep -q 'ssl_write_all_control' third_party/SoftEtherClient/src/main/cpp/softether-core/src/proto/softether_protocol.c
-          grep -q 'client.nativeSetMaxConnection(nativeHandle, 1)' third_party/SoftEtherClient/src/main/java/vn/unlimit/softether/controller/ConnectionController.kt
+          grep -q 'conn->forced_auth_type = -1' third_party/SoftEtherClient/src/main/cpp/softether-core/src/proto/softether_protocol.c
 
       - name: Fetch pinned MS-SSTP Android engine
         shell: bash
