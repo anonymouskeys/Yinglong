@@ -103,39 +103,14 @@ jobs:
           cp "$REF/ncurses.cmake" "$CPP/ncurses.cmake"
           cp "$REF/readline.cmake" "$CPP/readline.cmake"
 
-          # Fix historical readline CMake quoting for modern Android Clang.
-          python3 - <<'PYREADLINE'
-          from pathlib import Path
+          # Fix readline definitions without YAML heredocs.
+          # target_compile_definitions() already adds -D itself.
+          sed -i 's/        -DHAVE_CONFIG_H/        HAVE_CONFIG_H/' "$CPP/readline.cmake"
+          sed -i 's/        -DREADLINE_LIBRARY/        READLINE_LIBRARY/' "$CPP/readline.cmake"
+          sed -i 's@        -DRL_LIBRARY_VERSION='\''"8.0"'\''@        RL_LIBRARY_VERSION=\\"8.0\\"@' "$CPP/readline.cmake"
 
-          p = Path("third_party/SoftEtherClient/src/main/cpp/readline.cmake")
-          s = p.read_text()
-
-          old = """target_compile_definitions(readline PRIVATE
-        -DHAVE_CONFIG_H
-        )
-target_compile_definitions(readline PUBLIC
-        -DREADLINE_LIBRARY
-        -DRL_LIBRARY_VERSION='"8.0"'
-        )"""
-
-          new = """target_compile_definitions(readline PRIVATE
-        HAVE_CONFIG_H
-        )
-target_compile_definitions(readline PUBLIC
-        READLINE_LIBRARY
-        RL_LIBRARY_VERSION=\"8.0\"
-        )"""
-
-          if new not in s:
-              if old not in s:
-                  raise SystemExit("readline compile-definitions block not found")
-              s = s.replace(old, new, 1)
-              p.write_text(s)
-
-          fixed = p.read_text()
-          if 'RL_LIBRARY_VERSION=\\\"8.0\\\"' not in fixed:
-              raise SystemExit("readline version macro fix failed")
-          PYREADLINE
+          grep -Fq 'RL_LIBRARY_VERSION=\"8.0\"' "$CPP/readline.cmake"
+          ! grep -Fq -- '-DRL_LIBRARY_VERSION=' "$CPP/readline.cmake"
 
           mkdir -p "$CPP/official_android"
           cp official_softether/CMakeLists.txt "$CPP/CMakeLists.txt"
