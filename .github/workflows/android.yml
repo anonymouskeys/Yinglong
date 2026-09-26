@@ -103,6 +103,40 @@ jobs:
           cp "$REF/ncurses.cmake" "$CPP/ncurses.cmake"
           cp "$REF/readline.cmake" "$CPP/readline.cmake"
 
+          # Fix historical readline CMake quoting for modern Android Clang.
+          python3 - <<'PYREADLINE'
+          from pathlib import Path
+
+          p = Path("third_party/SoftEtherClient/src/main/cpp/readline.cmake")
+          s = p.read_text()
+
+          old = """target_compile_definitions(readline PRIVATE
+        -DHAVE_CONFIG_H
+        )
+target_compile_definitions(readline PUBLIC
+        -DREADLINE_LIBRARY
+        -DRL_LIBRARY_VERSION='"8.0"'
+        )"""
+
+          new = """target_compile_definitions(readline PRIVATE
+        HAVE_CONFIG_H
+        )
+target_compile_definitions(readline PUBLIC
+        READLINE_LIBRARY
+        RL_LIBRARY_VERSION=\"8.0\"
+        )"""
+
+          if new not in s:
+              if old not in s:
+                  raise SystemExit("readline compile-definitions block not found")
+              s = s.replace(old, new, 1)
+              p.write_text(s)
+
+          fixed = p.read_text()
+          if 'RL_LIBRARY_VERSION=\\\"8.0\\\"' not in fixed:
+              raise SystemExit("readline version macro fix failed")
+          PYREADLINE
+
           mkdir -p "$CPP/official_android"
           cp official_softether/CMakeLists.txt "$CPP/CMakeLists.txt"
           cp official_softether/android_official_jni.c \
@@ -121,6 +155,7 @@ jobs:
           grep -q "androidx.core:core-ktx:1.13.1" third_party/SoftEtherClient/build.gradle
           ! grep -q 'softether-core/src/proto' "$CPP/CMakeLists.txt"
           grep -q 'cedar_official' "$CPP/CMakeLists.txt"
+          grep -Fq 'RL_LIBRARY_VERSION=\"8.0\"' "$CPP/readline.cmake"
           grep -q 'NewClientSession' "$CPP/official_android/android_official_jni.c"
 
       - name: Fetch pinned MS-SSTP Android engine
