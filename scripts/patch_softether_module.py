@@ -227,7 +227,7 @@ p, s = load("src/main/cpp/softether-core/src/crypto/aes_wrapper.c")
 s = once(
     s,
     "#include <unistd.h>\n#include <pthread.h>\n",
-    "#include <unistd.h>\n#include <pthread.h>\n#include <fcntl.h>\n#include <poll.h>\n#include <time.h>\n#include <stdint.h>\n",
+    "#include <unistd.h>\n#include <pthread.h>\n#include <fcntl.h>\n#include <poll.h>\n#include <time.h>\n#include <stdint.h>\n#include <sys/socket.h>\n",
     "TLS timeout includes",
 )
 
