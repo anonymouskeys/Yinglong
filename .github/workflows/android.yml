@@ -80,6 +80,9 @@ jobs:
           grep -q 'source=native-softether-only' app/src/main/java/org/yinglong/client/net/SoftEtherProbe.java
           ! grep -q 'OpenVpnProfileUtil.endpoint' app/src/main/java/org/yinglong/client/net/SoftEtherProbe.java
 
+      - name: Test SoftEther TLS deadlines
+        run: python3 tests/test_softether_tls_timeout.py third_party/SoftEtherClient
+
       - name: Fetch pinned MS-SSTP Android engine
         shell: bash
         run: |

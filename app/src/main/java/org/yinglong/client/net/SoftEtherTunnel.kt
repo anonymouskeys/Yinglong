@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import org.yinglong.client.MainActivity
+import org.yinglong.client.BuildConfig
 import org.yinglong.client.catalog.Relay
 import org.yinglong.client.diag.AppLog
 import vn.unlimit.softether.SoftEtherVpnService
@@ -75,6 +76,12 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
     fun lastFailure(): String = failure
 
     fun connectBlocking(relay: Relay, port: Int, timeoutMs: Long, progress: Progress?): Boolean {
+        if (!healthy || !isPermissionGranted()) {
+            failureStage = "ENGINE_START"
+            failure = if (!healthy) "SoftEther native engine unavailable" else "Android VPN permission missing"
+            progress?.onProgress(failureStage, failure)
+            return false
+        }
         // VPN Gate's SoftEther hub is VPNGATE/user vpn.  In the wild two client
         // conventions exist: anonymous login (the actual hub account type) and
         // vpn/vpn password login.  Try both on the SAME endpoint before throwing
@@ -86,9 +93,8 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
             AuthVariant("PASSWORD", "vpn", AuthMethod.PASSWORD),
             AuthVariant("ANONYMOUS", "", AuthMethod.ANONYMOUS)
         )
-        // ConnectionController inside the SoftEther module already retries three times.
-        // The old wrapper killed the service at 18s, before the native timeout/retry
-        // path could finish. Give the module enough wall-clock time for a real result.
+        // The patched controller performs one attempt. Allow time for TCP,
+        // TLS, protocol authentication and session/DHCP setup.
         val perVariantTimeout = timeoutMs
             .coerceAtLeast(25_000L)
             .coerceAtMost(35_000L)
@@ -168,13 +174,12 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
             useUdp = false,
             udpPort = 0,
             udpOnly = false,
-            // Per-native-attempt timeout. Three attempts plus retry delays fit
-            // inside the outer 55s attempt budget.
+            // Per-native-operation timeout, within the outer 25–35s budget.
             connectTimeoutMs = 8_000,
             country = relay.countryShort ?: "",
             clientProductName = "Yinglong",
-            clientVersion = "0.9.5",
-            clientBuild = 33,
+            clientVersion = BuildConfig.VERSION_NAME,
+            clientBuild = BuildConfig.VERSION_CODE,
             fullDuplex = true
         )
 
@@ -363,12 +368,18 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
             val dir = appContext.applicationInfo.nativeLibraryDir
             val so = File(dir, "libsoftether.so")
             nativeOk = so.isFile && so.length() > 0L
+            // A packaged .so can still fail to load (ABI, missing symbols or
+            // dependencies). Detect this before starting the VPN service.
+            if (nativeOk) {
+                System.loadLibrary("softether")
+            }
             AppLog.i(
                 "se-engine",
                 "nativeLibraryDir=$dir libsoftether=${so.exists()} bytes=${if (so.exists()) so.length() else 0} " +
                     "abis=${Build.SUPPORTED_ABIS.contentToString()}"
             )
         } catch (t: Throwable) {
+            nativeOk = false
             AppLog.e("se-engine", "SoftEther native library check failed", t)
         }
 

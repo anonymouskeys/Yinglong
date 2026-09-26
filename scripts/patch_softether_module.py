@@ -285,11 +285,9 @@ int ssl_connect_timeout(ssl_context_t* ctx, int socket_fd, const char* hostname,
      * forever and prevent the transport fallback from progressing.
      */
     int old_flags = fcntl(socket_fd, F_GETFL, 0);
-    if (old_flags >= 0) {
-        if (fcntl(socket_fd, F_SETFL, old_flags | O_NONBLOCK) != 0) {
-            LOGE("Failed to set TLS fd non-blocking: errno=%d (%s)",
-                 errno, strerror(errno));
-        }
+    if (old_flags < 0 || fcntl(socket_fd, F_SETFL, old_flags | O_NONBLOCK) != 0) {
+        LOGE("Cannot enforce TLS deadline: errno=%d (%s)", errno, strerror(errno));
+        goto HANDSHAKE_FAIL;
     }
 
     uint64_t deadline = ssl_monotonic_ms() + (uint64_t)timeout_ms;
@@ -302,14 +300,15 @@ int ssl_connect_timeout(ssl_context_t* ctx, int socket_fd, const char* hostname,
         // Serialize only the OpenSSL step. Never hold this global mutex while
         // waiting in poll(), otherwise NAT-T/DNS race threads are serialized.
         pthread_mutex_lock(&g_openssl_lock);
+        ERR_clear_error();
         result = SSL_do_handshake(ctx->ssl);
+        ssl_error = result == 1 ? SSL_ERROR_NONE : SSL_get_error(ctx->ssl, result);
         pthread_mutex_unlock(&g_openssl_lock);
 
         if (result == 1) {
             break;
         }
 
-        ssl_error = SSL_get_error(ctx->ssl, result);
         if (ssl_error != SSL_ERROR_WANT_READ &&
             ssl_error != SSL_ERROR_WANT_WRITE) {
             unsigned long err_detail = ERR_get_error();
@@ -338,10 +337,10 @@ int ssl_connect_timeout(ssl_context_t* ctx, int socket_fd, const char* hostname,
         pfd.fd = socket_fd;
         pfd.events = (ssl_error == SSL_ERROR_WANT_WRITE) ? POLLOUT : POLLIN;
 
-        int pr;
-        do {
-            pr = poll(&pfd, 1, remaining);
-        } while (pr < 0 && errno == EINTR);
+        int pr = poll(&pfd, 1, remaining);
+        // Return to the deadline check after a signal; reusing 'remaining'
+        // here lets repeated signals extend the timeout indefinitely.
+        if (pr < 0 && errno == EINTR) continue;
 
         if (pr == 0) {
             LOGE("SSL handshake poll timeout after %d ms fd=%d host=%s",
@@ -387,6 +386,7 @@ int ssl_connect_timeout(ssl_context_t* ctx, int socket_fd, const char* hostname,
 HANDSHAKE_FAIL_LOCKED:
     pthread_rwlock_unlock(&g_tls_use_lock);
 
+HANDSHAKE_FAIL:
     if (old_flags >= 0) {
         fcntl(socket_fd, F_SETFL, old_flags);
     }
