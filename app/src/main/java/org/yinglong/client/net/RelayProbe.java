@@ -48,9 +48,18 @@ public final class RelayProbe {
                 + " concurrency=" + concurrency + " timeoutMs=" + timeoutMs);
 
         List<Relay> seed = new ArrayList<>(relays);
-        seed.sort(Comparator
-                .comparingLong((Relay r) -> r.score).reversed()
-                .thenComparingInt(r -> r.pingMs <= 0 ? Integer.MAX_VALUE : r.pingMs));
+        seed.sort((a, b) -> {
+            boolean af = isFreshOfficial(a);
+            boolean bf = isFreshOfficial(b);
+            if (af != bf) return af ? -1 : 1;
+
+            int scoreCmp = Long.compare(b.score, a.score);
+            if (scoreCmp != 0) return scoreCmp;
+
+            int ap = a.pingMs <= 0 ? Integer.MAX_VALUE : a.pingMs;
+            int bp = b.pingMs <= 0 ? Integer.MAX_VALUE : b.pingMs;
+            return Integer.compare(ap, bp);
+        });
         if (seed.size() > maxCandidates) seed = new ArrayList<>(seed.subList(0, maxCandidates));
 
         int workers = Math.max(1, Math.min(concurrency, 20));
@@ -88,7 +97,15 @@ public final class RelayProbe {
             int pa = transportPriority(a);
             int pb = transportPriority(b);
             if (pa != pb) return Integer.compare(pa, pb);
-            if (a.liveTcp && b.liveTcp && a.connectMs != b.connectMs) return Long.compare(a.connectMs, b.connectMs);
+
+            boolean af = isFreshOfficial(a.relay);
+            boolean bf = isFreshOfficial(b.relay);
+            if (af != bf) return af ? -1 : 1;
+
+            if (a.liveTcp && b.liveTcp && a.connectMs != b.connectMs) {
+                return Long.compare(a.connectMs, b.connectMs);
+            }
+
             int scoreCmp = Long.compare(b.relay.score, a.relay.score);
             if (scoreCmp != 0) return scoreCmp;
             return Integer.compare(a.relay.pingMs, b.relay.pingMs);
@@ -126,6 +143,14 @@ public final class RelayProbe {
             AppLog.w("probe", "tcp fail ip=" + r.ip + " port=" + ep.port + " reason=" + e.getClass().getSimpleName());
             return null;
         }
+    }
+
+    private static boolean isFreshOfficial(Relay relay) {
+        if (relay == null) return false;
+        String message = relay.message == null ? "" : relay.message;
+        String operator = relay.operator == null ? "" : relay.operator;
+        return message.contains("live-mirror-bootstrap")
+                || operator.contains("VPN Gate official live HTML");
     }
 
     private static int transportPriority(Result r) {

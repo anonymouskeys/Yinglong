@@ -154,7 +154,7 @@ public final class VpnSessionManager {
         boolean maintenanceStarted = false;
 
         try {
-            setState(State.SEARCHING, "Пробую обновить список VPN Gate…");
+            setState(State.SEARCHING, "Загружаю свежие VPN Gate relay…");
 
             try {
                 int pool = new RelayUpdater(context).bootstrapMerged(BOOTSTRAP_ROUNDS);

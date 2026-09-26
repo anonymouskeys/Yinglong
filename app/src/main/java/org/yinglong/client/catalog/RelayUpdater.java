@@ -27,7 +27,9 @@ import java.util.regex.Pattern;
 public final class RelayUpdater {
     public static final String VPN_GATE_CSV = "https://www.vpngate.net/api/iphone/";
     public static final String VPN_GATE_LIST = "https://www.vpngate.net/en/";
+    public static final String VPN_GATE_ALT_LIST = "https://download.vpngate.jp/en/";
     private static final int MINIMUM_ACCEPTED_RELAYS = 10;
+    private static final int MIRROR_BOOTSTRAP_PROFILES = 16;
     private static final long MAX_BODY = 32L * 1024L * 1024L;
 
     private static final Pattern DETAIL_LINK = Pattern.compile(
@@ -82,15 +84,25 @@ public final class RelayUpdater {
                 String url = VPN_GATE_CSV + "?_yinglong_bootstrap="
                         + System.currentTimeMillis() + "_" + i;
                 List<Relay> fresh = fetchCsv(url, 4_500, 8_000);
-                AppLog.i("catalog", "bootstrap round=" + (i + 1)
+                AppLog.i("catalog", "bootstrap API round=" + (i + 1)
                         + " received=" + fresh.size());
                 pool = store.mergeRelays(fresh, MINIMUM_ACCEPTED_RELAYS);
                 health.markSeen(fresh);
                 ok++;
             } catch (IOException e) {
                 last = e;
-                AppLog.w("catalog", "bootstrap round=" + (i + 1)
-                        + " failed: " + e.getMessage());
+                String msg = e.getMessage() == null ? "" : e.getMessage();
+                AppLog.w("catalog", "bootstrap API round=" + (i + 1)
+                        + " failed: " + msg);
+
+                if (msg.contains("/127.0.0.1:")
+                        || msg.contains("/0.0.0.0:")
+                        || msg.contains("www.vpngate.net/127.0.0.1")) {
+                    AppLog.w("catalog",
+                            "primary VPN Gate origin resolves to a blocked/local address; "
+                                    + "switching to official HTML mirror");
+                    break;
+                }
             }
 
             if (i + 1 < n) {
@@ -103,10 +115,198 @@ public final class RelayUpdater {
             }
         }
 
-        if (ok == 0 && last != null) throw last;
-        AppLog.i("catalog", "bootstrapMerged complete successfulRounds=" + ok
-                + " pool=" + pool);
-        return pool;
+        if (ok > 0) {
+            AppLog.i("catalog", "bootstrapMerged complete source=api"
+                    + " successfulRounds=" + ok + " pool=" + pool);
+            return pool;
+        }
+
+        try {
+            pool = bootstrapFromOfficialHtml(MIRROR_BOOTSTRAP_PROFILES);
+            AppLog.i("catalog", "bootstrapMerged complete source=official-html"
+                    + " pool=" + pool);
+            return pool;
+        } catch (IOException mirrorError) {
+            AppLog.w("catalog", "official HTML bootstrap failed: "
+                    + mirrorError.getMessage());
+            if (last != null) {
+                mirrorError.addSuppressed(last);
+            }
+            throw mirrorError;
+        }
+    }
+
+    private int bootstrapFromOfficialHtml(int maxProfiles) throws IOException {
+        String[] origins = new String[] {
+                VPN_GATE_ALT_LIST,
+                VPN_GATE_LIST
+        };
+
+        IOException last = null;
+
+        for (String origin : origins) {
+            try {
+                List<Relay> fresh = harvestProfilesFromOrigin(
+                        origin,
+                        maxProfiles,
+                        true
+                );
+
+                if (fresh.isEmpty()) {
+                    fresh = harvestProfilesFromOrigin(
+                            origin,
+                            Math.max(4, maxProfiles / 2),
+                            false
+                    );
+                }
+
+                if (fresh.isEmpty()) {
+                    throw new IOException("no fresh OpenVPN profiles from " + origin);
+                }
+
+                int pool = store.mergeRelays(fresh, 1);
+                health.markSeen(fresh);
+
+                AppLog.i("catalog", "LIVE_PROFILE_BOOTSTRAP source=" + origin
+                        + " profiles=" + fresh.size()
+                        + " pool=" + pool);
+                return pool;
+            } catch (IOException e) {
+                last = e;
+                AppLog.w("catalog", "HTML origin failed origin=" + origin
+                        + " reason=" + e.getMessage());
+            }
+        }
+
+        if (last != null) throw last;
+        throw new IOException("no official VPN Gate HTML origin available");
+    }
+
+    private List<Relay> harvestProfilesFromOrigin(
+            String origin,
+            int maxProfiles,
+            boolean tcpOnly
+    ) throws IOException {
+        int limit = Math.max(1, Math.min(maxProfiles, 32));
+        String listUrl = origin + "?_yinglong_live=" + System.currentTimeMillis();
+
+        AppLog.i("catalog", "HTML bootstrap start origin=" + origin
+                + " limit=" + limit + " tcpOnly=" + tcpOnly);
+
+        String html = fetchText(listUrl, 6L * 1024L * 1024L, 5_000, 10_000);
+        Matcher m = DETAIL_LINK.matcher(html);
+
+        List<Relay> out = new ArrayList<>();
+        Set<String> endpoints = new HashSet<>();
+
+        while (m.find() && out.size() < limit) {
+            String relative = htmlDecode(m.group(1));
+            URL detailUrl = absolute(origin, relative);
+            Map<String, String> q = query(detailUrl.getQuery());
+
+            String ip = q.get("ip");
+            String fqdn = q.get("fqdn");
+            int tcpPort = positiveInt(q.get("tcp"));
+            int udpPort = positiveInt(q.get("udp"));
+
+            if (ip == null || ip.isEmpty()) continue;
+            if (tcpOnly && tcpPort <= 0) continue;
+            if (!tcpOnly && tcpPort <= 0 && udpPort <= 0) continue;
+
+            String desired = tcpPort > 0
+                    ? ip + "|tcp|" + tcpPort
+                    : ip + "|udp|" + udpPort;
+            if (!endpoints.add(desired)) continue;
+
+            try {
+                String detail = fetchText(
+                        detailUrl.toString(),
+                        768L * 1024L,
+                        4_500,
+                        8_000
+                );
+
+                String configUrl = chooseIpConfigUrl(detail, ip);
+                if (configUrl == null || configUrl.isEmpty()) {
+                    AppLog.w("catalog", "no IP .ovpn link ip=" + ip
+                            + " origin=" + origin);
+                    continue;
+                }
+
+                String ovpn = fetchText(
+                        absolute(origin, configUrl).toString(),
+                        2L * 1024L * 1024L,
+                        4_500,
+                        8_000
+                );
+
+                if (!looksLikeOpenVpn(ovpn)) {
+                    AppLog.w("catalog", "download is not an OpenVPN profile ip=" + ip);
+                    continue;
+                }
+
+                String low = ovpn.toLowerCase(java.util.Locale.US);
+                if (!low.contains("remote " + ip.toLowerCase(java.util.Locale.US) + " ")) {
+                    AppLog.w("catalog", "fresh profile remote mismatch ip=" + ip);
+                    continue;
+                }
+
+                String b64 = Base64.encodeToString(
+                        ovpn.getBytes(StandardCharsets.UTF_8),
+                        Base64.NO_WRAP
+                );
+
+                Relay fresh = new Relay(
+                        fqdn == null || fqdn.isEmpty() ? ip : fqdn,
+                        ip,
+                        0L,
+                        0,
+                        0L,
+                        "",
+                        "",
+                        0,
+                        0L,
+                        0L,
+                        0L,
+                        "",
+                        "VPN Gate official live HTML",
+                        "live-mirror-bootstrap",
+                        b64
+                );
+
+                out.add(fresh);
+
+                String transport = tcpPort > 0
+                        ? "tcp:" + tcpPort
+                        : "udp:" + udpPort;
+
+                AppLog.i("catalog", "LIVE_PROFILE ip=" + ip
+                        + " endpoint=" + transport
+                        + " origin=" + origin
+                        + " count=" + out.size() + "/" + limit);
+            } catch (Exception e) {
+                AppLog.w("catalog", "live profile failed ip=" + ip
+                        + " origin=" + origin
+                        + " reason=" + e.getClass().getSimpleName()
+                        + ": " + (e.getMessage() == null ? "" : e.getMessage()));
+            }
+        }
+
+        AppLog.i("catalog", "HTML bootstrap done origin=" + origin
+                + " tcpOnly=" + tcpOnly
+                + " profiles=" + out.size());
+
+        return out;
+    }
+
+    private static int positiveInt(String value) {
+        if (value == null) return 0;
+        try {
+            int n = Integer.parseInt(value.trim());
+            return n > 0 && n <= 65535 ? n : 0;
+        } catch (Throwable ignored) {
+            return 0;
+        }
     }
 
     public int refreshMerged(int rounds) throws IOException {
@@ -216,6 +416,18 @@ public final class RelayUpdater {
         return new String(fetchBytes(url, max), StandardCharsets.UTF_8);
     }
 
+    private static String fetchText(
+            String url,
+            long max,
+            int connectTimeoutMs,
+            int readTimeoutMs
+    ) throws IOException {
+        return new String(
+                fetchBytes(url, max, connectTimeoutMs, readTimeoutMs),
+                StandardCharsets.UTF_8
+        );
+    }
+
     private static byte[] fetchBytes(String url, long max) throws IOException {
         return fetchBytes(url, max, 15_000, 45_000);
     }
@@ -225,7 +437,7 @@ public final class RelayUpdater {
         c.setInstanceFollowRedirects(true);
         c.setConnectTimeout(Math.max(1_000, connectTimeoutMs));
         c.setReadTimeout(Math.max(1_000, readTimeoutMs));
-        c.setRequestProperty("User-Agent", "Yinglong/0.3.12 (+VPN Gate client)");
+        c.setRequestProperty("User-Agent", "Yinglong/0.9.0 (+VPN Gate client)");
         c.setRequestProperty("Accept", "text/plain,text/csv,text/html,application/x-openvpn-profile,*/*;q=0.1");
         try {
             int code = c.getResponseCode();
@@ -244,15 +456,20 @@ public final class RelayUpdater {
         } finally { c.disconnect(); }
     }
 
-    private static URL absolute(String href) throws IOException {
+    private static URL absolute(String origin, String href) throws IOException {
         try {
             String h = htmlDecode(href);
-            if (h.startsWith("http://") || h.startsWith("https://")) return new URL(h);
-            if (h.startsWith("../")) return new URL("https://www.vpngate.net/" + h.substring(3));
-            if (h.startsWith("./")) h = h.substring(2);
-            if (h.startsWith("/")) return new URL("https://www.vpngate.net" + h);
-            return new URL("https://www.vpngate.net/en/" + h);
-        } catch (Exception e) { throw new IOException("bad VPN Gate URL", e); }
+            if (h.startsWith("http://") || h.startsWith("https://")) {
+                return new URL(h);
+            }
+            return new URL(new URL(origin), h);
+        } catch (Exception e) {
+            throw new IOException("bad VPN Gate URL origin=" + origin, e);
+        }
+    }
+
+    private static URL absolute(String href) throws IOException {
+        return absolute(VPN_GATE_LIST, href);
     }
 
     private static Map<String, String> query(String raw) {
