@@ -44,8 +44,8 @@ public final class VpnSessionManager {
     private volatile String detail = "";
 
     private static final int BOOTSTRAP_ROUNDS = 3;
-    private static final int SOFTETHER_MAX_RELAY_ATTEMPTS = 0;
-    private static final long SOFTETHER_ATTEMPT_TIMEOUT_MS = 55_000L;
+    private static final int SOFTETHER_MAX_RELAY_ATTEMPTS = 4;
+    private static final long SOFTETHER_ATTEMPT_TIMEOUT_MS = 45_000L;
     private static final int SSTP_MAX_ATTEMPTS = 8;
     private static final long SSTP_ATTEMPT_TIMEOUT_MS = 30_000L;
     private static final int OPENVPN_MAX_ATTEMPTS = 40;
@@ -415,7 +415,7 @@ public final class VpnSessionManager {
 
                 if (connectedRelay == null) {
                     throw new IllegalStateException(
-                            "Не удалось подключиться через OpenVPN"
+                            "Не удалось подключиться через SoftEther/OpenVPN"
                                     + (lastFailure.isEmpty()
                                     ? ""
                                     : "; последняя причина: " + lastFailure));
