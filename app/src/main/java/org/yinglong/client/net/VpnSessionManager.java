@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Yinglong v0.9.4 VPN Gate session:
+ * Yinglong v0.9.5 VPN Gate session:
  * native SoftEther first, official VPN Gate OpenVPN profile as fallback.
  */
 public final class VpnSessionManager {

@@ -19,15 +19,14 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
 /**
- * Ranks reachable SoftEther SSL-VPN TCP endpoints.
+ * Finds reachable native SoftEther SSL-VPN TCP listeners.
  *
- * VPN Gate normally advertises the same TCP endpoint in its SSL-VPN and
- * OpenVPN-TCP columns. The bundled .ovpn profile therefore provides the
- * strongest per-relay TCP-port hint. Standard SoftEther listener ports are
- * retained only as fallbacks.
+ * OpenVPN .ovpn "remote ... tcp" ports are OpenVPN-TCP endpoints. They are
+ * NOT native SoftEther listeners: OpenVPN expects its own packet framing
+ * before TLS. Native SoftEther is probed only on SoftEther listener ports.
  */
 public final class SoftEtherProbe {
-    private static final int[] FALLBACK_PORTS = {443, 992, 5555, 5556};
+    private static final int[] NATIVE_PORTS = {443, 992, 5555, 5556};
 
     private SoftEtherProbe() {}
 
@@ -38,16 +37,10 @@ public final class SoftEtherProbe {
     private static final class HostTarget {
         final Relay relay;
         final Set<Integer> ports = new LinkedHashSet<>();
-        final Set<Integer> advertisedPorts = new LinkedHashSet<>();
 
         HostTarget(Relay relay) {
             this.relay = relay;
-        }
-
-        void add(int port, boolean advertised) {
-            if (port <= 0 || port > 65535) return;
-            ports.add(port);
-            if (advertised) advertisedPorts.add(port);
+            for (int port : NATIVE_PORTS) ports.add(port);
         }
     }
 
@@ -55,13 +48,11 @@ public final class SoftEtherProbe {
         public final Relay relay;
         public final int port;
         public final long connectMs;
-        public final boolean advertised;
 
-        Result(Relay relay, int port, long connectMs, boolean advertised) {
+        Result(Relay relay, int port, long connectMs) {
             this.relay = relay;
             this.port = port;
             this.connectMs = connectMs;
-            this.advertised = advertised;
         }
     }
 
@@ -73,39 +64,20 @@ public final class SoftEtherProbe {
                 .thenComparingInt(r -> r.pingMs <= 0 ? Integer.MAX_VALUE : r.pingMs));
 
         Map<String, HostTarget> targets = new LinkedHashMap<>();
-
         for (Relay relay : sorted) {
             if (relay == null || relay.ip == null || relay.ip.trim().isEmpty()) continue;
-
             String ip = relay.ip.trim();
-            HostTarget target = targets.get(ip);
-            if (target == null) {
-                if (targets.size() >= maxHosts) continue;
-                target = new HostTarget(relay);
-                targets.put(ip, target);
-            }
-
-            try {
-                OpenVpnProfileUtil.Endpoint ep = OpenVpnProfileUtil.endpoint(relay);
-                if (ep != null && ep.tcp) {
-                    target.add(ep.port, true);
-                }
-            } catch (Throwable e) {
-                AppLog.w("se-probe", "profile endpoint parse failed ip=" + ip);
-            }
-
-            for (int port : FALLBACK_PORTS) {
-                target.add(port, false);
-            }
+            if (targets.containsKey(ip)) continue;
+            if (targets.size() >= maxHosts) break;
+            targets.put(ip, new HostTarget(relay));
         }
 
         List<HostTarget> hosts = new ArrayList<>(targets.values());
-        int endpointCount = 0;
-        for (HostTarget h : hosts) endpointCount += h.ports.size();
+        int endpointCount = hosts.size() * NATIVE_PORTS.length;
 
         AppLog.i(
                 "se-probe",
-                "SoftEther scan start source=advertised-tcp+native-fallback hosts=" + hosts.size()
+                "SoftEther scan start source=native-softether-only hosts=" + hosts.size()
                         + " endpoints=" + endpointCount
                         + " concurrency=" + concurrency
                         + " timeoutMs=" + timeoutMs
@@ -150,15 +122,13 @@ public final class SoftEtherProbe {
         }
 
         out.sort((a, b) -> {
-            if (a.advertised != b.advertised) return a.advertised ? -1 : 1;
+            int pa = nativePortPriority(a.port);
+            int pb = nativePortPriority(b.port);
+            if (pa != pb) return Integer.compare(pa, pb);
             if (a.connectMs != b.connectMs) return Long.compare(a.connectMs, b.connectMs);
 
             int score = Long.compare(b.relay.score, a.relay.score);
             if (score != 0) return score;
-
-            int pa = fallbackPortPriority(a.port);
-            int pb = fallbackPortPriority(b.port);
-            if (pa != pb) return Integer.compare(pa, pb);
 
             return Integer.compare(
                     a.relay.pingMs <= 0 ? Integer.MAX_VALUE : a.relay.pingMs,
@@ -166,40 +136,32 @@ public final class SoftEtherProbe {
             );
         });
 
-        int advertisedCount = 0;
-        for (Result r : out) if (r.advertised) advertisedCount++;
-
         AppLog.i("se-probe", "SoftEther scan done candidates=" + out.size()
-                + " advertised=" + advertisedCount);
+                + " source=native-softether-only");
         return out;
     }
 
     private static List<Result> probeHost(HostTarget target, int timeoutMs) {
         List<Result> out = new ArrayList<>();
-
         for (int port : target.ports) {
             long start = android.os.SystemClock.elapsedRealtime();
             try (Socket socket = new Socket()) {
                 socket.connect(new InetSocketAddress(target.relay.ip, port), timeoutMs);
                 long ms = Math.max(1L, android.os.SystemClock.elapsedRealtime() - start);
-                boolean advertised = target.advertisedPorts.contains(port);
-
                 AppLog.i(
                         "se-probe",
-                        "tcp open ip=" + target.relay.ip
+                        "native tcp open ip=" + target.relay.ip
                                 + " port=" + port
-                                + " source=" + (advertised ? "advertised" : "fallback")
                                 + " connectMs=" + ms
                 );
-                out.add(new Result(target.relay, port, ms, advertised));
+                out.add(new Result(target.relay, port, ms));
             } catch (Throwable ignored) {
             }
         }
-
         return out;
     }
 
-    private static int fallbackPortPriority(int port) {
+    private static int nativePortPriority(int port) {
         if (port == 443) return 0;
         if (port == 992) return 1;
         if (port == 5555) return 2;

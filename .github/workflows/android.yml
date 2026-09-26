@@ -76,6 +76,9 @@ jobs:
           python3 scripts/patch_softether_module.py third_party/SoftEtherClient
           grep -q 'ssl_write_all_control' third_party/SoftEtherClient/src/main/cpp/softether-core/src/proto/softether_protocol.c
           grep -q 'conn->forced_auth_type = -1' third_party/SoftEtherClient/src/main/cpp/softether-core/src/proto/softether_protocol.c
+          grep -q 'ssl_connect_timeout' third_party/SoftEtherClient/src/main/cpp/softether-core/src/crypto/aes_wrapper.c
+          grep -q 'source=native-softether-only' app/src/main/java/org/yinglong/client/net/SoftEtherProbe.java
+          ! grep -q 'OpenVpnProfileUtil.endpoint' app/src/main/java/org/yinglong/client/net/SoftEtherProbe.java
 
       - name: Fetch pinned MS-SSTP Android engine
         shell: bash
