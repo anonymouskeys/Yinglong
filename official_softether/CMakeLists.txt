@@ -47,6 +47,7 @@ target_include_directories(mayaqua_official PUBLIC
 
 target_compile_definitions(cedar_official PRIVATE
     UNIX UNIX_LINUX NO_VLAN
+    _REENTRANT REENTRANT _THREAD_SAFE _THREADSAFE THREAD_SAFE THREADSAFE _FILE_OFFSET_BITS=64
     getch=getchar
     CEDAR_VERSION_MAJOR=4
     CEDAR_VERSION_MINOR=44
@@ -56,6 +57,7 @@ target_compile_definitions(cedar_official PRIVATE
 )
 target_compile_definitions(mayaqua_official PRIVATE
     UNIX UNIX_LINUX NO_VLAN SKIP_CPU_FEATURES
+    _REENTRANT REENTRANT _THREAD_SAFE _THREADSAFE THREAD_SAFE THREADSAFE _FILE_OFFSET_BITS=64
 )
 
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
