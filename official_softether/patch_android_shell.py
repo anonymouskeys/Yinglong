@@ -91,4 +91,72 @@ s=once(
 )
 p.write_text(s)
 
+
+# Strict Android networking semantics for official Cedar.
+p,s=load("src/main/java/vn/unlimit/softether/SoftEtherVpnService.kt")
+
+builder_anchor = """        val builder = Builder()
+            .setSession(config.sessionName)
+            .setMtu(config.mtu)
+            .addAddress(config.localAddress, config.prefixLength)
+            .addDnsServer(config.dnsServer)
+"""
+builder_new = """        val builder = Builder()
+            .setSession(config.sessionName)
+            .setMtu(config.mtu)
+            .addAddress(config.localAddress, config.prefixLength)
+            .addDnsServer(config.dnsServer)
+
+        try {
+            builder.addDisallowedApplication(packageName)
+            Log.d(TAG, "VPN provider package excluded from its own tunnel: $packageName")
+        } catch (e: Exception) {
+            Log.w(TAG, "Unable to exclude VPN provider package; native protect(fd) remains active", e)
+        }
+"""
+if "VPN provider package excluded from its own tunnel" not in s:
+    s=once(s,builder_anchor,builder_new,"exclude provider package")
+
+v6_start = s.find("        // IPv6 tunnel: unique per-install ULA address")
+v6_end = s.find("        // Exclude apps from VPN tunnel", v6_start)
+if v6_start >= 0 and v6_end >= 0:
+    v6_new = """        // IPv6 is enabled only when an explicit address is supplied.
+        // Full desktop parity requires RA/NDP learned from the remote L2 segment.
+        if (config.localAddressV6.isNotBlank()) {
+            try {
+                builder.addAddress(config.localAddressV6, config.prefixLengthV6)
+                if (config.dnsServerV6.isNotBlank()) {
+                    builder.addDnsServer(config.dnsServerV6)
+                }
+                config.routesV6.forEach { route ->
+                    builder.addRoute(route.address, route.prefixLength)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Explicit IPv6 configuration rejected; continuing IPv4-only", e)
+            }
+        }
+
+"""
+    s = s[:v6_start] + v6_new + s[v6_end:]
+elif "IPv6 is enabled only when an explicit address is supplied." not in s:
+    raise SystemExit("IPv6 synthetic block not found")
+p.write_text(s)
+
+p,s=load("src/main/java/vn/unlimit/softether/controller/ConnectionController.kt")
+dhcp_old = """        } else {
+            Log.w(TAG, "DHCP failed, falling back to hardcoded IP config")
+            assignedLocalIp = config.localAddress
+            vpnInterface = service.establishVpnInterface(config)
+                ?: throw Exception("Failed to establish VPN interface")
+        }
+"""
+dhcp_new = """        } else {
+            throw Exception("SoftEther L2 session established, but DHCP returned no IPv4 lease")
+        }
+"""
+if dhcp_new not in s:
+    s=once(s,dhcp_old,dhcp_new,"strict DHCP")
+p.write_text(s)
+
+
 print("Android VpnService shell patched for official native core")

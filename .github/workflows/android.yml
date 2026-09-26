@@ -130,6 +130,11 @@ jobs:
           grep -q "androidx.core:core-ktx:1.13.1" third_party/SoftEtherClient/build.gradle
           ! grep -q 'softether-core/src/proto' "$CPP/CMakeLists.txt"
           grep -q 'cedar_official' "$CPP/CMakeLists.txt"
+          test -f "$CPP/official/SoftEtherVPN/src/Mayaqua/zlib/zlib.h"
+          grep -A10 'target_include_directories(mayaqua_official PUBLIC' "$CPP/CMakeLists.txt" | grep -Fq '"${SE_SRC}/Mayaqua"'
+          grep -q 'ctx->client = CiNewClient();' "$CPP/official_android/android_official_jni.c"
+          grep -q 'CtReleaseClient(ctx->client)' "$CPP/official_android/android_official_jni.c"
+          ! grep -q 'ctx->cedar = NewCedar(NULL, NULL);' "$CPP/official_android/android_official_jni.c"
           grep -Fq 'RL_LIBRARY_VERSION=\"8.0\"' "$CPP/readline.cmake"
           grep -q 'NewClientSession' "$CPP/official_android/android_official_jni.c"
 

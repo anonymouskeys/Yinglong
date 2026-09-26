@@ -40,6 +40,7 @@ target_include_directories(cedar_official PUBLIC
 )
 target_include_directories(mayaqua_official PUBLIC
     "${SE_SRC}"
+    "${SE_SRC}/Mayaqua"
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/iconv/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/openssl/include"

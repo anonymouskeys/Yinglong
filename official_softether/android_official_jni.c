@@ -67,6 +67,7 @@ typedef struct official_ctx
     FRAME_NODE *rx_tail;
 
     CANCEL *adapter_cancel;
+    CLIENT *client;
     CEDAR *cedar;
     SESSION *session;
 
@@ -895,12 +896,21 @@ Java_vn_unlimit_softether_client_SoftEtherClient_nativeCreate(
     ctx->half_connection = 0;
     ctx->state = YS_STATE_DISCONNECTED;
     ctx->adapter_cancel = NewCancel();
-    ctx->cedar = NewCedar(NULL, NULL);
 
-    if (ctx->adapter_cancel == NULL || ctx->cedar == NULL)
+    /*
+     * The official desktop vpnclient creates a CLIENT before sessions.
+     * NewClientSession()/ClientThread use client-side globals initialized by
+     * CiNewClient(), including the active-session lock/counters.
+     */
+    ctx->client = CiNewClient();
+    ctx->cedar = (ctx->client != NULL) ? ctx->client->Cedar : NULL;
+
+    if (ctx->adapter_cancel == NULL || ctx->client == NULL || ctx->cedar == NULL)
     {
         if (ctx->adapter_cancel != NULL) ReleaseCancel(ctx->adapter_cancel);
-        if (ctx->cedar != NULL) ReleaseCedar(ctx->cedar);
+        if (ctx->client != NULL) CtReleaseClient(ctx->client);
+        ctx->client = NULL;
+        ctx->cedar = NULL;
         pthread_cond_destroy(&ctx->rx_cond);
         pthread_mutex_destroy(&ctx->lock);
         free(ctx);
@@ -935,9 +945,10 @@ Java_vn_unlimit_softether_client_SoftEtherClient_nativeDestroy(
         ctx->adapter_cancel = NULL;
     }
 
-    if (ctx->cedar != NULL)
+    if (ctx->client != NULL)
     {
-        ReleaseCedar(ctx->cedar);
+        CtReleaseClient(ctx->client);
+        ctx->client = NULL;
         ctx->cedar = NULL;
     }
 
