@@ -45,8 +45,8 @@ public final class VpnSessionManager {
 
     private static final int BOOTSTRAP_ROUNDS = 3;
     private static final int SOFTETHER_MAX_RELAY_ATTEMPTS = 8;
-    private static final int SOFTETHER_RESTRICTED_MAX_RELAY_ATTEMPTS = 3;
-    private static final long SOFTETHER_ATTEMPT_TIMEOUT_MS = 35_000L;
+    private static final int SOFTETHER_RESTRICTED_MAX_RELAY_ATTEMPTS = 8;
+    private static final long SOFTETHER_ATTEMPT_TIMEOUT_MS = 65_000L;
     private static final int SSTP_MAX_ATTEMPTS = 8;
     private static final long SSTP_ATTEMPT_TIMEOUT_MS = 30_000L;
     private static final int OPENVPN_MAX_ATTEMPTS = 40;
@@ -196,9 +196,8 @@ public final class VpnSessionManager {
 
                 // 1) Official SoftEther v4.44-9807 first.
                 //
-                // Do NOT pre-probe guessed SoftEther ports. The official
-                // ClientConnectGetSocket/TcpIpConnectEx path performs direct
-                // TCP and the official NAT-T/R-UDP fallback itself.
+                // Prefer reachable TCP listeners, then retain unprobed 443
+                // endpoints so a failed TCP probe never disables Cedar NAT-T.
                 if (softEther.engineHealthy() && SOFTETHER_MAX_RELAY_ATTEMPTS > 0) {
                     setState(State.SEARCHING,
                             "Official SoftEther: Cedar/Mayaqua • выбираю VPN Gate relay…");
@@ -217,18 +216,37 @@ public final class VpnSessionManager {
                                     + " restrictedNetwork=" + restrictedNetwork
                                     + " outerTimeoutMs=" + SOFTETHER_ATTEMPT_TIMEOUT_MS);
 
-                    int softAttempt = 0;
+                    List<SoftEtherProbe.Result> endpoints = SoftEtherProbe.rank(
+                            softRelays, 24, 24, 1500, null);
+                    // Reserve two full attempts for NAT-T even if the TCP
+                    // scan yields many accepting but non-SoftEther listeners.
+                    endpoints = new ArrayList<>(endpoints.subList(0,
+                            Math.min(endpoints.size(), Math.max(0, softAttemptLimit - 2))));
+                    // A TCP accept is only a ranking hint; Cedar validates TLS,
+                    // the SoftEther protocol and authentication on every attempt.
+                    java.util.Set<String> endpointKeys = new java.util.HashSet<>();
+                    for (SoftEtherProbe.Result endpoint : endpoints) {
+                        endpointKeys.add(endpoint.relay.ip + ":" + endpoint.port);
+                    }
                     for (Relay relay : softRelays) {
+                        if (relay != null && relay.ip != null
+                                && endpointKeys.add(relay.ip + ":443")) {
+                            endpoints.add(new SoftEtherProbe.Result(relay, 443, Long.MAX_VALUE));
+                        }
+                    }
+                    int softAttempt = 0;
+                    for (SoftEtherProbe.Result endpoint : endpoints) {
+                        Relay relay = endpoint.relay;
                         if (!active(token)) return;
                         if (relay == null || relay.ip == null || relay.ip.isEmpty()) continue;
                         if (softAttempt >= softAttemptLimit) break;
                         softAttempt++;
 
-                        final int directPort = 443;
+                        final int directPort = endpoint.port;
                         final String base = "Official SoftEther " + softAttempt + "/"
                                 + softAttemptLimit
                                 + " • " + safe(relay.countryShort) + " " + relay.ip
-                                + " • Cedar TCP→NAT-T";
+                                + " • Cedar tcp:" + directPort + "→NAT-T";
 
                         setState(State.CONNECTING, base);
                         AppLog.i("session", base);

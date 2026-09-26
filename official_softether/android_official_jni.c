@@ -76,6 +76,7 @@ typedef struct official_ctx
     volatile int state;
 
     int timeout_ms;
+    char last_error[192];
     int forced_auth_type;
     int max_connection;
     int half_connection;
@@ -957,6 +958,15 @@ Java_vn_unlimit_softether_client_SoftEtherClient_nativeDestroy(
     free(ctx);
 }
 
+JNIEXPORT jstring JNICALL
+Java_vn_unlimit_softether_client_SoftEtherClient_nativeGetLastError(
+        JNIEnv *env, jobject thiz, jlong handle)
+{
+    OFFICIAL_CTX *ctx = (OFFICIAL_CTX *)(intptr_t)handle;
+    (void)thiz;
+    return (*env)->NewStringUTF(env, ctx == NULL ? "No native context" : ctx->last_error);
+}
+
 JNIEXPORT jint JNICALL
 Java_vn_unlimit_softether_client_SoftEtherClient_nativeConnect(
         JNIEnv *env, jobject thiz, jlong handle,
@@ -999,6 +1009,7 @@ Java_vn_unlimit_softether_client_SoftEtherClient_nativeConnectWithHub(
         goto CLEANUP_STRINGS;
 
     ctx->stopping = 0;
+    ctx->last_error[0] = 0;
     ctx->adapter_active = 0;
     ctx->state = YS_STATE_CONNECTING;
     ctx->gateway_mac_valid = 0;
@@ -1092,13 +1103,18 @@ Java_vn_unlimit_softether_client_SoftEtherClient_nativeConnectWithHub(
         {
             UINT err = s->Err;
             LOGE("official session stopped during connect err=%u", err);
-            result = map_official_error(err);
+            snprintf(ctx->last_error, sizeof(ctx->last_error),
+                     "Cedar error=%u status=%d elapsedMs=%llu", err, st,
+                     (unsigned long long)(Tick64() - started));
+            result = (err == ERR_NO_ERROR) ? YS_ERR_SESSION : map_official_error(err);
             break;
         }
 
         if ((int)(Tick64() - started) >= ctx->timeout_ms)
         {
             LOGE("official connect watchdog timeout after %d ms", ctx->timeout_ms);
+            snprintf(ctx->last_error, sizeof(ctx->last_error),
+                     "Cedar watchdog=%dms status=%d error=%u", ctx->timeout_ms, st, s->Err);
             result = YS_ERR_TIMEOUT;
             break;
         }
@@ -1397,7 +1413,7 @@ Java_vn_unlimit_softether_client_SoftEtherClient_nativeDoDhcp(
     UCHAR frame[640];
     UINT xid, server_id = 0;
     UINT assigned = 0, mask = 0, gateway = 0, dns1 = 0, dns2 = 0, lease = 0;
-    int len, msg, retry;
+    int len, msg = 0, retry;
     jint values[7];
     jintArray arr;
     (void)thiz;

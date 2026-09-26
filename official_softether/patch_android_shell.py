@@ -180,3 +180,16 @@ p.write_text(s)
 
 
 print("Android VpnService shell patched for official native core")
+
+# Expose the original Cedar result instead of losing it in a generic error enum.
+p,s=load("src/main/java/vn/unlimit/softether/client/SoftEtherClient.kt")
+s=once(s, "    external fun nativeConnect(",
+       "    external fun nativeGetLastError(handle: Long): String\n\n    external fun nativeConnect(",
+       "Cedar error JNI declaration")
+p.write_text(s)
+p,s=load("src/main/java/vn/unlimit/softether/controller/ConnectionController.kt")
+s=once(s,
+       'val nativeFailure = "Connection failed: ${SoftEtherError.getErrorString(result)} ($result)"',
+       'val nativeFailure = "Connection failed: ${SoftEtherError.getErrorString(result)} ($result); ${client.nativeGetLastError(nativeHandle)}"',
+       "Cedar error detail")
+p.write_text(s)

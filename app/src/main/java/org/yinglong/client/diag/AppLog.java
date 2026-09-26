@@ -127,6 +127,9 @@ public final class AppLog {
         synchronized (LOCK) {
             StringBuilder out = new StringBuilder();
             out.append("Yinglong diagnostics\n")
+                    .append("APK ").append(org.yinglong.client.BuildConfig.VERSION_NAME)
+                    .append(" versionCode=").append(org.yinglong.client.BuildConfig.VERSION_CODE)
+                    .append(" exported=").append(timestamp()).append('\n')
                     .append("Android ").append(Build.VERSION.RELEASE)
                     .append(" API ").append(Build.VERSION.SDK_INT)
                     .append(" / ").append(Build.MANUFACTURER).append(" ").append(Build.MODEL).append('\n');

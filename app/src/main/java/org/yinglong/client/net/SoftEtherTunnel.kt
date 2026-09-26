@@ -90,8 +90,8 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
         // Keep the outer budget larger than Cedar's own watchdog so the native
         // direct-TCP -> NAT-T/R-UDP path can return a real result to Kotlin.
         val perVariantTimeout = timeoutMs
-            .coerceAtLeast(25_000L)
-            .coerceAtMost(35_000L)
+            .coerceAtLeast(65_000L)
+            .coerceAtMost(90_000L)
         var lastReason = ""
         for ((index, variant) in variants.withIndex()) {
             AppLog.i(
@@ -146,9 +146,9 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
         failure = ""
         failureStage = ""
 
-        // Native Cedar gets most of the outer attempt budget. Keep a few seconds
-        // for the Android service to deliver the final state/error back to Yinglong.
-        val nativeConnectTimeoutMs = (timeoutMs - 5_000L)
+        // Reserve 35s for DHCP (up to 30s), gateway ARP and final state delivery.
+        // Cedar itself retains the existing 30s connection watchdog.
+        val nativeConnectTimeoutMs = (timeoutMs - 35_000L)
             .coerceAtLeast(15_000L)
             .coerceAtMost(30_000L)
 
@@ -175,12 +175,12 @@ class SoftEtherTunnel private constructor(context: Context) : SoftEtherVpnServic
             udpPort = 0,
             udpOnly = false,
             // Official TcpIpConnectEx may need time for direct TCP and its
-            // built-in NAT-T/R-UDP fallback. Leave 5s for shell error delivery.
+            // built-in NAT-T/R-UDP fallback. DHCP has its own outer budget.
             connectTimeoutMs = nativeConnectTimeoutMs.toInt(),
             country = relay.countryShort ?: "",
             clientProductName = "Yinglong",
-            clientVersion = "1.0.4",
-            clientBuild = 38,
+            clientVersion = "1.0.5",
+            clientBuild = 39,
             fullDuplex = true
         )
 

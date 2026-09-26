@@ -12,7 +12,8 @@ public final class YinglongApp extends Application {
         super.onCreate();
         AppLog.init(this);
         AppLog.installCrashHandler(this);
-        AppLog.i("app", "Yinglong process started v1.0.0 sdk=" + Build.VERSION.SDK_INT
+        AppLog.i("app", "Yinglong process started v" + BuildConfig.VERSION_NAME
+                + " versionCode=" + BuildConfig.VERSION_CODE + " sdk=" + Build.VERSION.SDK_INT
                 + " device=" + Build.MANUFACTURER + " " + Build.MODEL);
         try {
             RelayStore store = new RelayStore(this);
