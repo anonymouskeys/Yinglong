@@ -13,13 +13,13 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/readline.cmake")
 include("${CMAKE_CURRENT_SOURCE_DIR}/iconv.cmake")
 
 set(CEDAR_SRCS
-    Account.c Admin.c AzureClient.c AzureServer.c Bridge.c BridgeUnix.c
+    Account.c Admin.c AzureClient.c AzureServer.c Bridge.c
     CM.c Cedar.c CedarPch.c Client.c Command.c Connection.c Console.c DDNS.c
     Database.c EM.c EtherLog.c Hub.c Layer3.c Link.c Listener.c Logging.c
     NM.c Nat.c NativeStack.c NullLan.c IPsec.c IPsec_EtherIP.c IPsec_IKE.c
     IPsec_IPC.c IPsec_IkePacket.c IPsec_L2TP.c IPsec_PPP.c Interop_OpenVPN.c
     Interop_SSTP.c Protocol.c Radius.c Remote.c SM.c SW.c Sam.c SeLowUser.c SecureInfo.c
-    SecureNAT.c Server.c Session.c UT.c UdpAccel.c VG.c VLan.c VLanUnix.c
+    SecureNAT.c Server.c Session.c UT.c UdpAccel.c VG.c VLan.c
     Virtual.c WaterMark.c WebUI.c WinUi.c Wpc.c
 )
 PREPEND(CEDAR_SRC_PATHS "${SE_SRC}/Cedar" ${CEDAR_SRCS})
@@ -47,6 +47,7 @@ target_include_directories(mayaqua_official PUBLIC
 
 target_compile_definitions(cedar_official PRIVATE
     UNIX UNIX_LINUX NO_VLAN
+    getch=getchar
     CEDAR_VERSION_MAJOR=4
     CEDAR_VERSION_MINOR=44
     CEDAR_VERSION_BUILD=9807
