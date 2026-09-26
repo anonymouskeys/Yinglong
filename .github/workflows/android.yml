@@ -50,6 +50,32 @@ jobs:
           test "$(git -C third_party/SoftEtherClient rev-parse HEAD)" = "fc0140212c0111ed93b95243c4d04711a9a0a019"
           git -C third_party/SoftEtherClient submodule update --init --depth 1 src/main/cpp/openssl
 
+          # Upstream Android shell has Kotlin sources and a kotlin { } block,
+          # but applies only com.android.library. Yinglong root already provides
+          # org.jetbrains.kotlin.android 2.0.21, so apply it before evaluation.
+          python3 - <<'PYGRADLE'
+          from pathlib import Path
+          p = Path("third_party/SoftEtherClient/build.gradle")
+          s = p.read_text()
+
+          if "id 'org.jetbrains.kotlin.android'" not in s:
+              old = "plugins {\n    id 'com.android.library'\n}"
+              new = "plugins {\n    id 'com.android.library'\n    id 'org.jetbrains.kotlin.android'\n}"
+              if old not in s:
+                  raise SystemExit("SoftEtherClient plugins block not found")
+              s = s.replace(old, new, 1)
+
+          s = s.replace(
+              "implementation 'androidx.core:core-ktx:1.18.0'",
+              "implementation 'androidx.core:core-ktx:1.13.1'"
+          )
+
+          p.write_text(s)
+
+          if "id 'org.jetbrains.kotlin.android'" not in s:
+              raise SystemExit("Kotlin Android plugin patch failed")
+          PYGRADLE
+
           rm -rf third_party/SoftEtherClient/src/main/cpp/official
           mkdir -p third_party/SoftEtherClient/src/main/cpp/official
           git clone --filter=blob:none https://github.com/SoftEtherVPN/SoftEtherVPN_Stable.git \
@@ -91,6 +117,8 @@ jobs:
             src/Cedar/Protocol.c src/Cedar/Connection.c src/Cedar/Session.c \
             src/Mayaqua/Network.c src/Mayaqua/Encrypt.c src/Mayaqua/Pack.c)"
 
+          grep -q "id 'org.jetbrains.kotlin.android'" third_party/SoftEtherClient/build.gradle
+          grep -q "androidx.core:core-ktx:1.13.1" third_party/SoftEtherClient/build.gradle
           ! grep -q 'softether-core/src/proto' "$CPP/CMakeLists.txt"
           grep -q 'cedar_official' "$CPP/CMakeLists.txt"
           grep -q 'NewClientSession' "$CPP/official_android/android_official_jni.c"
